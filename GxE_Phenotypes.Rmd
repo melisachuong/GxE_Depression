@@ -1,0 +1,1493 @@
+---
+title: "GxE_Phenotypes"
+author: "Melisa Chuong"
+date: "23/07/2021"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## AIM:  
+
+Within this project, I aim to explore gene-by-environment interaction effects. I am particularly interested in depression and neuroticism as the dependent variables, and trauma as the environmental variable.  
+
+I aim to uncover and quantify the variance accounted for by the interaction of the DV and environmental variables. I will explore mixed linear models using REstricted Maximum Likelihood (REML). These main analyses will be implemented using the Genome-wide Complex Trait Analysis (GCTA) software (Yang et al., 2011).  
+
+I will be exploring the genetic, environmental and GxE interaction effects using relationship matrices made up of pair-wise similarity relationships of participants obtained from the UK Biobank study. 
+
+
+In this section I provide the definitions for the phenotypes used within the analyses.  
+
+## FILE LOCATIONS:  
+
+You can use the browse option on the UKB website to find each question and which questionnaire the questions are from. https://biobank.ndph.ox.ac.uk/showcase/search.cgi  
+
+Different files will be used to obtain the variables we need, these are available within datastore on Eddie:  
+
+1. This file has the UKB Mental Health Questionnaire (MHQ) fields and responses  
+/exports/igmm/datastore/GenScotDepression/data/ukb/phenotypes/psych/mhq/**MHQ.1708.ukb10422.inputs.rds**  
+
+2. This file has the Touchscreen Questionnaire fields and responses  
+/exports/igmm/datastore/GenScotDepression/data/ukb/phenotypes/rds/**Touchscreen.rds**  
+
+## DEPRESSION: {.tabset} 
+
+There are two definitions of depression have been found to be often used within the literature; **CIDI** (Composite International Diagnostic Inventory) depression and **broad** depression.  
+
+1. BROAD depression  
+This definition is much broader and based on 2 self-report questions.  
+
+2. CIDI depression  
+This definition of depression is based on several structured questions addressing depressive symptoms and dysfunction.  
+The CIDI depression variable has already been created by Mark Adams (code available on his github: https://github.com/ccbs-stradl/ukb-mhg-phenotypes-edi/blob/master/psych/mhq/process_mhq.R). The code was adapted to re-create this variable whilst also keeping related participants.  
+
+### Filters  
+
+Here I specify some filters to ensure my case and control samples are genuinely cases and controls!  
+
+The questions for determining who to filter out of the analysis sample are:  
+
+**[f20544]** Report any mental health problems diagnosed by a professional  
+**[f20002]** Report depression in previous interview with psychiatric nurse  
+**[f20126]** Meet previous criteria for depression or bipolar disorder  
+**[f41202/f41204]** Have a hospital inpatient ICD10 code for mood disorder (F30-F39)  
+**[f20003]** Report use of anti-depressant medication* at baseline  
+
+```{r, eval=FALSE}
+
+library(tidyverse)
+library(dplyr)
+
+####################################################
+#     Other Mental Health/Psychiatric disorders    #
+####################################################
+
+#[f20544] Report any mental health problems diagnosed by a professional
+mhq <- readRDS("MHQ.1708.ukb10422.inputs.rds")
+
+# select all relevant columns 
+df <- mhq %>% 
+      select(f.eid, f.20544.0.1:f.20544.0.16) 
+
+# replace -818/-819 values with NA
+for(col in 2:17){
+  
+  df[,col][ df[,col] == -818] <- NA
+  df[,col][ df[,col] == -819] <- NA
+  
+  }                
+
+# create new column which shows participants who have at least 1 other mental health disorder
+df$anymh <- rowSums(df[,2:17], na.rm=TRUE) > 0
+
+#schizophrenia, any other type of psychosis or psychotic illness or mania, hypomania, bipolar or manic depression diagnosis will be case filters and named 'severe' mental health disorders
+
+#re-code above disorders so theyre easily identified
+for(col in 2:17){
+  
+  df[,col][ df[,col] == 2 ] <- 100
+  df[,col][ df[,col] == 3 ] <- 100
+  df[,col][ df[,col] == 10] <- 100
+
+  }
+
+#assign value of 0 to all other values
+for(col in 2:17){
+  df[,col][ df[,col] != 100 ] <- 0
+}
+
+# create new column which shows participants who have at least 1 of the 'severe' mental health disorders
+df$severemh <- rowSums(df[,2:17], na.rm=TRUE) > 0
+
+filter1 <- df %>%
+           select(f.eid, anymh, severemh) # n = 502639
+
+####################################################
+#     Interview with Psychiatric Nurse             #
+####################################################
+
+#[f20002] Report depression in previous interview with psychiatric nurse  
+
+filter2 <- mhq %>%
+           select(f.eid, f.20002.0.0) %>%
+           mutate(nurse_dep = f.20002.0.0 == 1286) %>%
+           select(f.eid, nurse_dep) # n = 502639
+                     
+####################################################
+#     Previous Diagnosis of Depression or Bipolar  #
+####################################################
+
+#[f20126] Meet previous criteria for depression or bipolar disorder  
+
+filter3 <- mhq %>% 
+           select(f.eid, f.20126.0.0) %>%
+           mutate(prev_dep_bd = f.20126.0.0 != "No Bipolar or Depression") %>%
+           select(f.eid, prev_dep_bd) # n = 502639
+
+####################################################
+#     Hospitilisation due to a Mood Disorder       #
+####################################################
+
+#[f41202/f41204] Have a hospital inpatient ICD10 code for mood disorder (F30-F39)
+
+# creating new cols (hosp1, hosp2) that consist of the first 2 letters of our hospitalisation columns
+# those with codes starting with F3 means they have been hospitalised due to a mood disorder
+# substr() function pulls the letters (or numbers) from position 1 to 2  
+filter4 <- mhq %>%
+           select(f.eid, f.41202.0.0, f.41204.0.0) %>%
+           mutate(hosp1 = substr(f.41202.0.0, 1, 2),
+                  hosp2 = substr(f.41204.0.0, 1, 2)) %>%
+           mutate(hospital = hosp1=="F3" | hosp2=="F3") %>%
+           select(f.eid, hospital) # n = 502639
+
+####################################################
+#    Use of Anti-Depressant Medication             #
+####################################################
+
+#[f20003] Report use of anti-depressant medication* at baseline
+
+#found from supplementary materials from (Coleman et al., 2020)
+
+antidepcodes <- c(1140879616, 1140921600, 1140879540, 1140867878, 1140916282, 1140909806, 1140867888, 1141152732, 1141180212, 1140879634, 1140867876, 140882236, 1141190158, 1141200564, 1140867726, 1140879620, 1140867818, 1140879630, 1140879628, 1141151946, 1140867948, 1140867624, 1140867756, 1140867884, 1141151978, 1141152736, 1141201834, 1140867690, 1140867640, 1140867920, 1140867850, 1140879544, 1141200570, 1140867934, 1140867758, 1140867914, 1140867820, 1141151982, 1140882244, 1140879556, 1140867852, 1140867860, 1140917460, 1140867938, 1140867856, 1140867922, 1140910820, 1140882312, 1140867944, 1140867784, 1140867812, 1140867668, 1140867940)
+
+filter5 <- mhq %>%
+           select(f.eid, f.20003.0.0) %>%
+           mutate(antidep = f.20003.0.0 %in% antidepcodes) %>%
+           select(f.eid, antidep) # n = 502639
+
+####################################################
+#          Combine Filter Variables                #
+####################################################
+
+filters <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid"), list(filter1, filter2, filter3, filter4, filter5))
+                  
+filters <- filters %>%
+           mutate(control_filter = anymh==TRUE | nurse_dep==TRUE | prev_dep_bd==TRUE | hospital==TRUE | antidep==TRUE)
+                  
+write.table(filters, "depression_filters_df", row.names=F, quote=F)
+
+```
+
+### BROAD DEPRESSION   
+
+Broad depression status can be obtained from responses to the following Touchscreen Questionnaire questions:  
+
+**[f2090.0.0]** Seen doctor (GP) for nerves, anxiety, tension or depression  
+**[f2100.0.0]** Seen a psychiatrist for nerves, anxiety, tension or depression  
+  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+touch <- readRDS("Touchscreen.rds")
+
+####################################################
+#     Check Responses to the Fields                #
+####################################################
+
+# We want participants with complete data for both questions
+broad <- touch %>%
+         select(f.eid, f.2090.0.0, f.2100.0.0) %>% 
+         drop_na() # n = 501581
+
+# Collating sample size information for both questions and responses 
+broad_ss <- apply(broad[,2:3], 2, function(x){table(x)}) 
+
+write.csv(broad_ss, "broad_dep_preexc_ss.csv", row.names=T, quote=F)
+
+####################################################
+#            Case Control Status                   #
+####################################################
+
+broad <- broad %>%
+         mutate(case = f.2090.0.0 == "Yes" | f.2100.0.0 == "Yes")
+
+####################################################
+#    Implementing Exclusion Criteria               #
+####################################################
+
+filters <- read.table("depression_filters_df", header=T)
+
+df <- merge(broad, filters, by="f.eid", all.x=TRUE, all.y=TRUE)
+
+#identify cases and controls that need to be filtered and remove
+
+df <- df %>% 
+      drop_na(case) %>% 
+      mutate(rm_ps = (case==TRUE & severemh==TRUE) | (case==FALSE & control_filter==TRUE)) %>%
+      subset(rm_ps!=TRUE | is.na(rm_ps)) %>%
+      select(f.eid, f.2090.0.0, f.2100.0.0, case) # n = 486165
+       
+#double check that ps are not considered both cases and controls
+
+length(unique(df$f.eid)) # n = 486165
+
+write.table(df, "broad_fields", row.names=F, quote=T) # quote=T as responses to certain columns are characters
+
+df2 <- df %>%
+       select(f.eid, case)
+
+write.table(df2, "broad_df", row.names=F, quote=F) # n = 486165
+
+####################################################
+#     Create a Sample Size Table                   #
+#################################################### 
+
+broad_ss <- apply(df[,2:3], 2, function(x){table(x)})
+write.csv(broad_ss, "broad_dep_postexc_ss.csv")
+
+####################################################
+#     Create a pheno file for GCTA                 #
+#################################################### 
+
+broad <- df2 %>%
+         mutate(iid = f.eid)
+broad <- broad[,c(1,3,2)] #reorganising so forma = FID, IID, CASESTATUS
+
+write.table(broad, "broad.phen", row.names=F, col.names=F, quote=F)
+
+```
+
+### CIDI DEPRESSION  
+
+CIDI depression status can be obtained from the following MHQ questions:  
+
+*Cardinal symptoms*  
+**[f20446]** Ever had prolonged feelings of sadness or depression  
+**[f20441]** Ever had prolonged loss of interest in normal activities  
+
+*Other symptoms*  
+**[f20449]** Feelings of tiredness during worst episode of depression  
+**[f20536]** Weight change during worst episode of depression  
+**[f20532]** Sleep change during worst episode of depression  
+**[f20435]** Difficulty concentrating during worst episode of depression  
+**[f20450]** Feelings of worthlessness during worst episode of depression  
+**[f20437]**Thoughts of death during worst episode of depression  
+
+AND report  
+
+*Measures of dysfunction*  
+**[f20436]** Most of the day or more affected during worst episode of depression  
+**[f20439]** Depressed (almost) every day during worst episode of depression  
+**[f20440]** More than a little impact on normal roles during worst period of depression  
+
+```{r, eval=FALSE}
+rm(list=ls())
+
+mhq <- readRDS("MHQ.1708.ukb10422.inputs.rds") #n=502639
+
+#extracting CIDI depression related fields  
+
+columns <- c("f.eid", "f.20446.0.0", "f.20441.0.0", "f.20449.0.0", "f.20536.0.0", "f.20532.0.0", "f.20435.0.0", "f.20450.0.0", "f.20437.0.0", "f.20436.0.0", "f.20439.0.0", "f.20440.0.0") #12 cols including f.eid
+
+cidi <- mhq[, columns ]
+
+####################################################
+#     Cardinal Symptoms: Depression & Anhedonia    #
+#     f.20446.0.0 // f.20441.0.0                   #
+####################################################
+
+cardinal_ss <- apply(cidi[,2:3], 2, function(x){table(x)})
+  
+
+write.csv(cardinal_ss, "cardinal_ss.csv", row.names=T, quote=F)
+
+####################################################
+#           Other Depression Symptoms              #
+####################################################
+
+symptoms <- cidi[,c(1, 4:9)] #just choosing the relevant columns
+
+#response to f.20536.0.0 (weight related question, column 3) has a different set of responses, will deal with that separately
+cidi_symptoms_ss <- apply(symptoms[,c(2,4:7)], 2, function(x){table(x)})
+wei_symptoms_ss <- table(symptoms[,3])
+
+write.csv(cidi_symptoms_ss, "cidi_symp_ss.csv")
+write.csv(wei_symptoms_ss, "cidi_weight_symp_ss.csv")
+
+#############################
+#   Dysfunction criteria:   #
+#############################
+
+dysfunction <- cidi %>%
+               select(f.eid, f.20436.0.0, f.20439.0.0, f.20440.0.0) # n = 157366
+
+dysfunction1_ss <- table(dysfunction[,2])
+write.csv(dysfunction1_ss, "dysfunction1_ss.csv", row.names=F, quote=F)
+
+dysfunction2_ss <- table(dysfunction[,3])
+write.csv(dysfunction2_ss, "dysfunction2_ss.csv", row.names=F, quote=F)
+
+dysfunction3_ss <- table(dysfunction[,4])
+write.csv(dysfunction3_ss, "dysfunction3_ss.csv", row.names=F, quote=F)
+
+######################################
+#     Creating a symptom sumscore    #
+######################################
+
+# We need to remove the effects of 'Prefer not to answer' responses - we can recode this to NA
+# We need to recode f.20536.0.0 responses 0-3, where >0 responses indicate weight change, this should all be coded 1
+
+for(col in 2:12){
+cidi[,col][cidi[,col]==-818] <- NA
+cidi[,col][cidi[,col]==-121] <- NA
+}
+
+cidi$f.20536.0.0[cidi$f.20536.0.0>=2] <- 1
+
+cidi$symp_sum <- rowSums(cidi[,2:9], na.rm=TRUE)
+
+write.table(cidi, "cidi_fields", row.names=F, quote=F) # n = 502639
+
+####################################################
+#     Case Control Status                          #
+####################################################
+
+# must have responded to both cardinal symptom questions and exhibit at least 1 of the cardinal symptoms
+
+cidi <- cidi %>% 
+        drop_na(f.20446.0.0, f.20441.0.0) %>%
+        mutate(cardinal_index = f.20446.0.0==1 | f.20441.0.0==1,
+               dys_index = f.20436.0.0 >= 3 & f.20439.0.0 >= 2 & f.20440.0.0 >= 2,
+               case = cardinal_index == TRUE & symp_sum >= 5 & dys_index == TRUE)
+
+cidi_dep_ss <- table(cidi$case)
+write.csv(cidi_dep_ss, "cidi_dep_preexc_ss.csv")
+
+# case = 37408 // control = 118087 // NA = 1181 // Total = 156676
+
+####################################################
+#    Implementing Exclusion Criteria               #
+####################################################
+
+filters <- read.table("depression_filters_df", header=T)
+
+df <- merge(cidi, filters, by="f.eid", all.x=TRUE, all.y=TRUE) # n = 502639
+
+#identify cases and controls that need to be filtered and remove
+
+df <- df %>% 
+      drop_na(case) %>% 
+      mutate(rm_ps = (case==TRUE & severemh==TRUE) | (case==FALSE & control_filter==TRUE)) %>%
+      subset(rm_ps!=TRUE | is.na(rm_ps)) %>%
+      select(f.eid, case) # n = 128927
+       
+#double check that ps are not considered both cases and controls
+
+length(unique(df$f.eid)) # n = 128927
+
+write.table(df, "cidi_df", row.names=F, quote=F) # quote=T as responses to certain columns are characters
+
+####################################################
+#     Create a Sample Size Table                   #
+#################################################### 
+
+cidi_ss <- table(df$case)
+write.csv(cidi_ss, "cidi_dep_postexc_ss.csv")
+
+####################################################
+#     Create a pheno file for GCTA                 #
+#################################################### 
+
+cidi <- df %>%
+        mutate(iid = f.eid)
+
+cidi <- cidi[,c(1,3,2)] #reorganising so format = FID, IID, CASESTATUS
+
+write.table(cidi, "cidi.phen", row.names=F, col.names=F, quote=F)
+
+```
+
+### NEUROTICISM    
+
+A 12-item scale (Eysenck Personality Questionnaire-Revised (EPQ-R) Short Form)
+was used to measure the personality trait of Neuroticism. This required binary responses (1-yes; 0 –no) to the following items:  
+
+**[f.1920.0.0]** Does your mood often go up and down?   
+**[f.1930.0.0]** Do you ever feel 'just miserable' for no reason?  
+**[f.1940.0.0]** Are you an irritable person?  
+**[f.1950.0.0]** Are your feelings easily hurt?  
+**[f.1960.0.0]** Do you often feel 'fed-up'?  
+**[f.1970.0.0]** Would you call yourself a nervous person?  
+**[f.1980.0.0]** Are you a worrier?  
+**[f.1990.0.0]** Would you call yourself tense or 'highly strung'?  
+**[f.2000.0.0]** Do you worry too long after an embarrassing experience?  
+**[f.2010.0.0]** Do you suffer from 'nerves'?  
+**[f.2020.0.0]** Do you often feel lonely?  
+**[f.2030.0.0]** Are you often troubled by feelings of guilt?  
+
+Scores from this neuroticism scale show high internal consistency and concurrent validity; importantly, genetic correlations between the short and long EPQ forms exceed 0.90 and, between the EPQ and more widely-used scales, such as the NEO Personality Inventory, are upwards of 0.82 (Luciano et al., 2018).  
+
+There were 501,278 individuals with neuroticism data in the UK Biobank sample. Of these, 99,604 provided ‘Do not Know’ or ‘Prefer not to Answer’ for between 1 and 12 neuroticism items. ‘Do not Know’ responses were more frequent than ‘Prefer not to Answer’, and there was variation in the endorsement of these between items (see Table S1). No single item had more than 5% of these non-usable responses (3.9% in the genotyped sample). Individuals who had more than four ‘Do not Know’ or ‘Prefer not to Answer’ responses were set to missing (n = 4683; 0 in the genotyped sample), because their overall score was considered unreliable. The remaining missing items (affecting 94,921 cases; 59,762 cases in the genotyped sample) were imputed by a logistic regression multiple imputation procedure including sex and age as predictors using the mice package in R 6 . A total neuroticism score was then calculated by summing the responses to the 12 items, with a Yes response scoring 1, and a No response scoring 0. 
+
+```{r, eval=FALSE}
+rm(list=ls())
+
+mhq <- readRDS("MHQ.1708.ukb10422.inputs.rds")
+
+neuro <- mhq %>%
+         select(f.eid, f.20127.0.0) %>%
+         drop_na(f.20127.0.0) #n = 401663
+
+####################################################
+#     Create a Sample Size Table                   #
+#################################################### 
+
+neuro_ss <- as.data.frame(table(neuro[,2]))
+write.csv(neuro_ss, "neuro_ss.csv")
+write.table(neuro, "neuro_df", row.names=F, quote=F)
+
+####################################################
+#     Create a pheno file for GCTA                 #
+#################################################### 
+
+neuro <- neuro %>%
+         mutate(iid = f.eid)
+
+neuro <- neuro[,c(1,3,2)] #reorganising so format = FID, IID, CASESTATUS
+
+write.table(neuro, "neuro.phen", row.names=F, col.names=F, quote=F)
+
+```
+
+## TRAUMA: {.tabset}  
+
+We want to find a way to make use of the trauma questions - but we need to identify which traumas are more important as well as how to weight them. This is particularly difficult due to many factors including unbalanced data, ensuring that each trauma sub phenotype is explored with the same level of statistical power is almost impossible. Furthermore, within the literature there is emphasis on many different traumas being the most important within traits such as depression.  
+
+One way to work around this is by obtaining the principal components of all the questions.  
+
+### CHILDHOOD TRAUMA  
+
+Responses to these questions range from 0-4, "Never True", "Rarely True", "Sometimes True" "Often True", "Always True" and *italic* questions are reverse scored    
+
+**[f20489]** *Felt loved*  
+**[f20488]** Hit hard  
+**[f20487]** Felt hated by family member  
+**[f20490]** Sexually molested   
+**[f20491]** *Someone to take to the doctor* 
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+mhq <- readRDS("MHQ.1708.ukb10422.inputs.rds")
+
+df <- mhq %>%
+      select(f.eid, f.20489.0.0, f.20488.0.0, f.20487.0.0, f.20490.0.0, f.20491.0.0)
+      
+
+####################################################
+#    Remove 'Prefer not to answer' Responses       #
+####################################################
+
+for(cols in c(2,3,4,5,6)){
+  df[,cols][df[,cols] == -818] <- NA
+}
+
+####################################################
+#    Implement Reverse Coding                      #
+####################################################
+
+for(reverse in c(2,6)){
+  df[,reverse] <- abs(df[,reverse]-4)
+}
+
+####################################################
+#     Create a Sample Size Table                   #
+#################################################### 
+
+ct_ss <- apply(df[,2:6], 2, function(x){table(x)})
+write.csv(ct_ss, "Childhood_Trauma_ss.csv")
+
+write.table(df, "ct_fields", row.names=F, quote=F)
+
+####################################################
+#    Childhood Trauma Sub Field Sample             #
+####################################################
+
+df <- df %>%
+      drop_na(f.20489.0.0, f.20488.0.0, f.20487.0.0, f.20490.0.0, f.20491.0.0) # n=153650
+
+write.table(df, "ct_df", row.names=F, quote=F)
+
+######################################### 
+# Running principle components analysis # 
+#########################################
+
+pca <- prcomp(df[,2:6], center=TRUE, scale.=TRUE)
+
+loadings <- as.data.frame(pca$rotation)
+
+pca_info <- summary(pca)[[6]]
+
+#combining pcs with relevant IDs
+pcs <- pca$x
+f.eid <- df[,1]
+pcs <- cbind(f.eid, pcs)
+
+write.csv(loadings, "CT_loading.csv")
+write.csv(pca_info, "CT_pca_info.csv")
+write.csv(pcs, "CT_pcs.csv")
+
+###########################################
+# Checking values of Principle Components #
+###########################################
+
+check <- lapply(pcs[,2:6], summary)
+check2 <- lapply(pcs[,2:6], var)
+
+pc_min <- c()
+pc_max <- c()
+pc_var <- c()
+
+for (list in c(1:5)){
+  min <- check[[list]][1]
+  pc_min <- cbind(pc_min, min)
+  max <- check[[list]][6]
+  pc_max <- cbind(pc_max, max)
+  var <- check2[[list]]
+  pc_var <- cbind(pc_var, var)
+}
+
+write.csv(pc_var, "CT_pcs_var.csv")
+write.csv(pc_min, "CT_pcs_min.csv")
+write.csv(pc_max, "CT_pcs_max.csv")
+
+```
+
+Important plots to help visualise our data are PC1vsPC2  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+#PC1 vs PC2  
+
+pcs <- read.csv("CT_pcs.csv", header=T) 
+pcs <- pcs[,-1] #rm saved row numbers
+
+png(filename = "CT_PC1vPC2.png")
+plot(pcs$2, pcs$3)
+dev.off()
+```
+
+![](CT_PC1vPC2.png)  
+
+As well as scree plots!  
+
+```{r, eval=FALSE}
+#SCREE PLOT
+
+library(ggplot2)
+
+pc <- read.csv("CT_pca_info.csv", header=F)
+var <- t(pc[3,2:6]) #row 3 = variance, the 5 PCs, transposed
+
+scree <- as.data.frame(matrix(NA, nrow=5, ncol=2))
+scree[,1] <- as.numeric(var)
+scree[,2] <- as.factor(c(1:5))
+
+png(filename="CT_pc_scree.png")
+
+ggplot(scree, aes(x=scree[,2], y=scree[,1], group=1)) + 
+  geom_line() +
+  geom_point() + 
+  labs(title="Scree Plot of Childhood Trauma PCs",
+       x ="Principal Components", y = "Accounted Variance")
+dev.off()
+
+```
+
+![](CT_pc_scree.png)  
+It is also important that our trauma PCs are associated with our outcomes!   
+
+```{r, eval = FALSE}
+
+rm(list=ls())
+
+broad <- read.table("broad_df", header=T) # n = 486165
+colnames(broad)[2] <- "broad"
+
+cidi <- read.table("cidi_df", header=T) # n = 128927
+colnames(cidi)[2] <- "cidi"
+
+neuro <- read.table("neuro_df", header=T) # n = 401663
+colnames(neuro)[2] <- "neuro"
+
+cov <- read.table("covariates", header=T)
+cov <- cov[,c(1:2,4)] #keeping only age and sex
+colnames(cov)[1] <- "f.eid"
+
+pcs <- read.csv("CT_pcs.csv")
+pcs <- pcs[,-1]
+colnames(pcs)[1] <- "f.eid"
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid", all.x=T, all.y=T), list(broad, cidi, neuro, pcs)) # n = 500974
+df <- merge(cov, df, by="f.eid", all.x=T) # n = 457440
+
+#################################
+# DV ~ trauma PC associations   #
+#################################
+
+dv <- df
+
+#cidi and broad depression
+
+final_result <- c()
+
+for(pheno in c("broad", "cidi")){
+  for(col in c(7:11)){
+    
+    #using columns 7:11 (PC1:5)
+    reg <- summary(glm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial"))
+    reg2 <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial")) #using lm() to obtain R2
+    
+    result <- cbind(reg$coefficients, reg2$adj.r.squared, reg$df[2], col)
+    colnames(result)[5] <- "AdjR2"
+    final_result <- rbind(final_result, result)
+  }
+}
+
+broad_results <- final_result[1:20,]
+cidi_results <- final_result[21:40,]
+
+write.csv(cidi_results, "cidi_ctPC_associations.csv")
+write.csv(broad_results, "broad_ctPC_associations.csv")
+
+#neuroticism
+
+pheno <- "neuro"
+final_result <- c()
+
+for(col in c(7:11)){
+  
+  reg <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data=dv)) #running lm() to obtain R2
+  result <- cbind(reg$coefficients, reg$adj.r.squared, reg$df[2], col)
+  colnames(result)[5] <- "AdjR2"
+  final_result <- rbind(final_result, result)
+  
+  write.csv(final_result, "neuro_ctPC_associations.csv")
+
+}
+
+```
+
+### ADULT TRAUMA  
+
+**[f20522]** *Been in a confiding relationship as an adult*  
+**[f20523]** Physical violence by partner or ex-partner as an adult  
+**[f20521]** Belittlement by partner or ex-partner as an adult  
+**[f20524]** Sexual interference by partner or ex-partner without consent as an adult  
+**[f20525]** *Able to pay rent/mortgage as an adult*  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+mhq <- readRDS("MHQ.1708.ukb10422.inputs.rds")
+
+df <- mhq %>%
+      select(f.eid, f.20522.0.0, f.20523.0.0, f.20521.0.0, f.20524.0.0, f.20525.0.0)
+
+####################################################
+#    Remove 'Prefer not to answer' Responses       #
+####################################################
+
+for(cols in c(2,3,4,5,6)){
+  df[,cols][df[,cols] == -818] <- NA
+}
+
+####################################################
+#    Implement Reverse Coding                      #
+####################################################
+
+for(reverse in c(2,6)){
+  df[,reverse] <- abs(df[,reverse]-4)
+}
+
+####################################################
+#     Create a Sample Size Table                   #
+#################################################### 
+
+at_ss <- apply(df[,2:6], 2, function(x){table(x)})
+write.csv(at_ss, "Adult_Trauma_ss.csv")
+
+write.table(df, "at_fields", row.names=F, quote=F)
+
+####################################################
+#    Adulthood Trauma Sub Field Sample             #
+####################################################
+
+df <- df %>%
+      drop_na(f.eid, f.20522.0.0, f.20523.0.0, f.20521.0.0, f.20524.0.0, f.20525.0.0) # n = 150939
+
+write.table(df, "at_df", row.names=F, quote=F)
+
+######################################### 
+# Running principle components analysis # 
+#########################################
+
+pca <- prcomp(df[,2:6], center=TRUE, scale.=TRUE)
+
+loadings <- as.data.frame(pca$rotation)
+
+pca_info <- summary(pca)[[6]]
+
+#combining pcs with relevant IDs
+pcs <- pca$x
+f.eid <- df[,1]
+pcs <- cbind(f.eid, pcs)
+
+write.csv(loadings, "AT_loading.csv")
+write.csv(pca_info, "AT_pca_info.csv")
+write.csv(pcs, "AT_pcs.csv")
+
+###########################################
+# Checking values of Principle Components #
+###########################################
+
+check <- lapply(pcs[,2:6], summary)
+check2 <- lapply(pcs[,2:6], var)
+
+pc_min <- c()
+pc_max <- c()
+pc_var <- c()
+
+for (list in c(1:5)){
+  min <- check[[list]][1]
+  pc_min <- cbind(pc_min, min)
+  max <- check[[list]][6]
+  pc_max <- cbind(pc_max, max)
+  var <- check2[[list]]
+  pv_var <- cbind(pc_var, var)
+}
+
+write.csv(pc_var, "AT_pcs_var.csv")
+write.csv(pc_min, "AT_pcs_min.csv")
+write.csv(pc_max, "AT_pcs_max.csv")
+
+
+```
+
+Important plots to help visualise our data are PC1vsPC2, and scree plots  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+#PC1 vs PC2  
+
+pcs <- read.csv("AT_pcs.csv", header=T) 
+pcs <- pcs[,-1] #rm saved row numbers
+
+png(filename = "AT_PC1vPC2.png")
+plot(pcs$2, pcs$3)
+dev.off()
+```
+
+![](AT_PC1vPC2.png)
+
+```{r, eval=FALSE}
+#SCREE PLOT
+
+library(ggplot2)
+
+pc <- read.csv("AT_pca_info.csv", header=F)
+var <- t(pc[3,2:6]) #row 3 = variance, the 5 PCs, transposed
+
+scree <- as.data.frame(matrix(NA, nrow=5, ncol=2))
+scree[,1] <- as.numeric(var)
+scree[,2] <- as.factor(c(1:5))
+
+png(filename="AT_pc_scree.png")
+
+ggplot(scree, aes(x=scree[,2], y=scree[,1], group=1)) + 
+  geom_line() +
+  geom_point() + 
+  labs(title="Scree Plot of Adult Trauma PCs",
+       x ="Principal Components", y = "Accounted Variance")
+dev.off()
+
+```
+
+![](AT_pc_scree.png)
+
+It is also important that our trauma PCs are associated with our outcomes!  
+
+```{r, eval = FALSE}
+
+rm(list=ls())
+
+broad <- read.table("broad_df", header=T) # n = 486165
+colnames(broad)[2] <- "broad"
+
+cidi <- read.table("cidi_df", header=T) # n = 128927
+colnames(cidi)[2] <- "cidi"
+
+neuro <- read.table("neuro_df", header=T) # n = 401663
+colnames(neuro)[2] <- "neuro"
+
+cov <- read.table("covariates", header=T)
+cov <- cov[,c(1:2,4)] #keeping only age and sex
+colnames(cov)[1] <- "f.eid"
+
+pcs <- read.csv("AT_pcs.csv")
+pcs <- pcs[,-1]
+colnames(pcs)[1] <- "f.eid"
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid", all.x=T, all.y=T), list(broad, cidi, neuro, pcs)) # n = 500923
+df <- merge(cov, df, by="f.eid", all.x=T) # n = 457440
+
+#################################
+# DV ~ trauma PC associations   #
+#################################
+
+dv <- df
+
+#cidi and broad depression
+
+final_result <- c()
+
+for(pheno in c("broad", "cidi")){
+  for(col in c(7:11)){
+    
+    #using columns 7:11 (PC1:5)
+    reg <- summary(glm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial"))
+    reg2 <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial")) #using lm() to obtain R2
+    
+    result <- cbind(reg$coefficients, reg2$adj.r.squared, reg$df[2], col)
+    colnames(result)[5] <- "AdjR2"
+    final_result <- rbind(final_result, result)
+  }
+}
+
+broad_results <- final_result[1:20,]
+cidi_results <- final_result[21:40,]
+
+write.csv(cidi_results, "cidi_atPC_associations.csv")
+write.csv(broad_results, "broad_atPC_associations.csv")
+
+#neuroticism
+
+pheno <- "neuro"
+final_result <- c()
+
+for(col in c(7:11)){
+  
+  reg <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data=dv)) #running lm() to obtain R2
+  result <- cbind(reg$coefficients, reg$adj.r.squared, reg$df[2], col)
+  colnames(result)[5] <- "AdjR2"
+  final_result <- rbind(final_result, result)
+  
+  write.csv(final_result, "neuro_atPC_associations.csv")
+
+}
+
+
+```
+
+### CATASTROPHIC TRAUMA  
+
+Responses to these questions range from 0-2, "Never", "Yes, within 12 months",  "Yes, not within 12 months".  
+
+**[f20531]** Victim of sexual assault  
+**[f20529]** Victim of physically violent crime  
+**[f20526]** Been in serious accident believed to be life-threatening  
+**[f20530]** Witnessed sudden violent death  
+**[f20528]** Diagnosed with life-threatening illness  
+**[f20527]** Been involved in combat or exposed to war-zone  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+mhq <- readRDS("MHQ.1708.ukb10422.inputs.rds")
+
+df <- mhq %>%
+      select(f.eid, f.20531.0.0, f.20529.0.0, f.20526.0.0, f.20530.0.0, f.20528.0.0, f.20527.0.0)
+
+####################################################
+#    Remove 'Prefer not to answer' Responses       #
+####################################################
+
+for(cols in c(2,3,4,5,6,7)){
+  df[,cols][df[,cols] == -818] <- NA
+}
+
+####################################################
+#     Create a Sample Size Table                   #
+#################################################### 
+
+cat_ss <- apply(df[,2:7], 2, function(x){table(x)})
+write.csv(cat_ss, "Catastrophic_Trauma_ss.csv")
+
+write.table(df, "cat_fields", row.names=F, quote=F)
+
+####################################################
+#    Catastrophic Trauma Sub Field Sample          #
+####################################################
+
+df <- df %>%
+      drop_na(f.20531.0.0, f.20529.0.0, f.20526.0.0, f.20530.0.0, f.20528.0.0, f.20527.0.0) # n = 154295
+
+write.table(df, "cat_df", row.names=F, quote=F)
+
+######################################### 
+# Running principle components analysis # 
+#########################################
+
+pca <- prcomp(df[,2:7], center=TRUE, scale.=TRUE)
+
+loadings <- as.data.frame(pca$rotation)
+
+pca_info <- summary(pca)[[6]]
+
+#combining pcs with relevant IDs
+pcs <- pca$x
+f.eid <- df[,1]
+pcs <- cbind(f.eid, pcs)
+
+write.csv(loadings, "CAT_loading.csv")
+write.csv(pca_info, "CAT_pca_info.csv")
+write.csv(pcs, "CAT_pcs.csv")
+
+###########################################
+# Checking values of Principle Components #
+###########################################
+
+check <- lapply(pcs[,2:7], summary)
+check2 <- lapply(pcs[,2:7], var)
+
+pc_min <- c()
+pc_max <- c()
+pc_var <- c()
+
+for (list in c(1:5)){
+  min <- check[[list]][1]
+  pc_min <- cbind(pc_min, min)
+  max <- check[[list]][6]
+  pc_max <- cbind(pc_max, max)
+  var <- check2[[list]]
+  pc_var <- cbind(pc_var, var)
+}
+
+write.csv(pc_var, "CAT_pcs_var.csv")
+write.csv(pc_min, "CAT_pcs_min.csv")
+write.csv(pc_max, "CAT_pcs_max.csv")
+
+```
+
+Important plots to help visualise our data are PC1vsPC2 
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+#PC1 vs PC2  
+
+pcs <- read.csv("CAT_pcs.csv", header=T) 
+pcs <- pcs[,-1] #rm saved row numbers
+
+png(filename = "CAT_PC1vPC2.png")
+plot(pcs$2, pcs$3)
+dev.off()
+```
+
+![](CAT_PC1vPC2.png)
+
+As well as scree plots!
+
+```{r, eval=FALSE}
+#SCREE PLOT
+
+library(ggplot2)
+
+pc <- read.csv("CAT_pca_info.csv", header=F)
+var <- t(pc[3,2:7]) #row 3 = variance, the 6 PCs, transposed
+
+scree <- as.data.frame(matrix(NA, nrow=6, ncol=2))
+scree[,1] <- as.numeric(var)
+scree[,2] <- as.factor(c(1:6))
+
+png(filename="CAT_pc_scree.png")
+
+ggplot(scree, aes(x=scree[,2], y=scree[,1], group=1)) + 
+  geom_line() +
+  geom_point() + 
+  labs(title="Scree Plot of Catastrophic Trauma PCs",
+       x ="Principal Components", y = "Accounted Variance")
+dev.off()
+
+```
+
+![](CAT_pc_scree.png)
+
+It is also important that our trauma PCs are associated with our outcomes!  
+
+
+```{r, eval = FALSE}
+
+rm(list=ls())
+
+broad <- read.table("broad_df", header=T) # n = 486165
+colnames(broad)[2] <- "broad"
+
+cidi <- read.table("cidi_df", header=T) # n = 128927
+colnames(cidi)[2] <- "cidi"
+
+neuro <- read.table("neuro_df", header=T) # n = 401663
+colnames(neuro)[2] <- "neuro"
+
+cov <- read.table("covariates", header=T)
+cov <- cov[,c(1:2,4)] #keeping only age and sex
+colnames(cov)[1] <- "f.eid"
+
+pcs <- read.csv("CAT_pcs.csv")
+pcs <- pcs[,-1]
+colnames(pcs)[1] <- "f.eid"
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid", all.x=T, all.y=T), list(broad, cidi, neuro, pcs)) # n = 500988
+df <- merge(cov, df, by="f.eid", all.x=T) # n = 457440
+
+#################################
+# DV ~ trauma PC associations   #
+#################################
+
+dv <- df
+
+#cidi and broad depression
+
+final_result <- c()
+
+for(pheno in c("broad", "cidi")){
+  for(col in c(7:12)){
+    
+    #using columns 7:11 (PC1:5)
+    reg <- summary(glm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial"))
+    reg2 <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial")) #using lm() to obtain R2
+    
+    result <- cbind(reg$coefficients, reg2$adj.r.squared, reg$df[2], col)
+    colnames(result)[5] <- "AdjR2"
+    final_result <- rbind(final_result, result)
+  }
+}
+
+broad_results <- final_result[1:24,]
+cidi_results <- final_result[25:48,]
+
+write.csv(cidi_results, "cidi_catPC_associations.csv")
+write.csv(broad_results, "broad_catPC_associations.csv")
+
+#neuroticism
+
+pheno <- "neuro"
+final_result <- c()
+
+for(col in c(7:12)){
+  
+  reg <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data=dv)) #running lm() to obtain R2
+  result <- cbind(reg$coefficients, reg$adj.r.squared, reg$df[2], col)
+  colnames(result)[5] <- "AdjR2"
+  final_result <- rbind(final_result, result)
+  
+  write.csv(final_result, "neuro_catPC_associations.csv")
+
+}
+
+```
+
+### TRAUMA  
+
+The trauma phenotype encompasses all the trauma subquestions.  
+
+```{r, eval=FALSE}
+rm(list=ls())
+
+ct_fields <- read.table("ct_fields", header=T)
+at_fields <- read.table("at_fields", header=T)
+cat_fields <- read.table("cat_fields", header=T)
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid", all.x=TRUE, all.y=TRUE), list(ct_fields, at_fields, cat_fields)) # n = 502639
+
+df <- df %>%
+      drop_na() # n = 146425
+write.table(df, "trauma_df", row.names=F, quote=F)
+
+######################################### 
+# Running principle components analysis # 
+#########################################
+
+pca <- prcomp(df[2:17], center=TRUE, scale.=TRUE)
+
+#important info from pca
+loadings <- as.data.frame(pca$rotation)
+pca_info <- summary(pca)[[6]]
+
+#merging PCs with relevant IDs
+f.eid <- df[,1]
+pcs <- pca$x
+pcs <- cbind(f.eid, pcs)
+
+write.csv(loadings, "trauma_loading.csv")
+write.csv(pca_info, "trauma_pca_info.csv")
+write.csv(pcs, "trauma_pcs.csv")
+
+###########################################
+# Checking values of Principle Components #
+###########################################
+
+check <- lapply(pcs[,2:17], summary)
+check2 <- lapply(pcs[,2:17], var)
+
+pc_min <- c()
+pc_max <- c()
+pc_var <- c()
+
+for (list in c(1:16)){
+  min <- check[[list]][1]
+  pc_min <- cbind(pc_min, min)
+  max <- check[[list]][6]
+  pc_max <- cbind(pc_max, max)
+  var <- check2[[list]]
+  pc_var <- cbind(pc_var, var)
+}
+
+write.csv(pc_var, "trauma_pcs_var.csv")
+write.csv(pc_min, "trauma_pcs_min.csv")
+write.csv(pc_max, "trauma_pcs_max.csv")
+
+```
+
+Important plots to help visualise our data are PC1vsPC2, and scree plots  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+#PC1 vs PC2  
+
+pcs <- read.csv("trauma_pcs.csv", header=T) 
+pcs <- pcs[,-1] #rm saved row numbers
+
+png(filename = "trauma_PC1vPC2.png")
+plot(pcs$2, pcs$3)
+dev.off()
+```
+
+![](trauma_PC1vPC2.png)
+
+
+```{r, eval=FALSE}
+#SCREE PLOT
+
+library(ggplot2)
+
+pc <- read.csv("trauma_pca_info.csv", header=F)
+var <- t(pc[3,2:17]) #row 3 = variance, the 16 PCs, transposed
+
+scree <- as.data.frame(matrix(NA, nrow=16, ncol=2))
+scree[,1] <- as.numeric(var)
+scree[,2] <- as.factor(c(1:16))
+
+png(filename="trauma_pc_scree.png")
+
+ggplot(scree, aes(x=scree[,2], y=scree[,1], group=1)) + 
+  geom_line() +
+  geom_point() + 
+  labs(title="Scree Plot of Trauma PCs",
+       x ="Principal Components", y = "Accounted Variance")
+dev.off()
+
+```
+
+![](trauma_pc_scree.png)
+It is also important that our trauma PCs are associated with our outcomes!  
+
+
+```{r, eval = FALSE}
+
+rm(list=ls())
+
+broad <- read.table("broad_df", header=T) # n = 486165
+colnames(broad)[2] <- "broad"
+
+cidi <- read.table("cidi_df", header=T) # n = 128927
+colnames(cidi)[2] <- "cidi"
+
+neuro <- read.table("neuro_df", header=T) # n = 401663
+colnames(neuro)[2] <- "neuro"
+
+cov <- read.table("covariates", header=T)
+cov <- cov[,c(1:2,4)] #keeping only age and sex
+colnames(cov)[1] <- "f.eid"
+
+pcs <- read.csv("trauma_pcs.csv")
+pcs <- pcs[,-1]
+colnames(pcs)[1] <- "f.eid"
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid", all.x=T, all.y=T), list(broad, cidi, neuro, pcs)) # n = 500988
+df <- merge(cov, df, by="f.eid", all.x=T) # n = 457440
+
+#################################
+# DV ~ trauma PC associations   #
+#################################
+
+dv <- df
+
+#cidi and broad depression
+
+final_result <- c()
+
+for(pheno in c("broad", "cidi")){
+  for(col in c(7:22)){
+    
+    #using columns 7:22 (PC1:16)
+    reg <- summary(glm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial"))
+    reg2 <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data = dv, family = "binomial")) #using lm() to obtain R2
+    
+    result <- cbind(reg$coefficients, reg2$adj.r.squared, reg$df[2], col)
+    colnames(result)[5] <- "AdjR2"
+    final_result <- rbind(final_result, result)
+  }
+}
+
+broad_results <- final_result[1:64,]
+cidi_results <- final_result[65:128,]
+
+write.csv(cidi_results, "cidi_traumaPC_associations.csv")
+write.csv(broad_results, "broad_traumaPC_associations.csv")
+
+#neuroticism
+
+pheno <- "neuro"
+final_result <- c()
+
+for(col in c(7:22)){
+  
+  reg <- summary(lm(dv[,pheno] ~ age_0initial + sex + dv[,col], data=dv)) #running lm() to obtain R2
+  result <- cbind(reg$coefficients, reg$adj.r.squared, reg$df[2], col)
+  colnames(result)[5] <- "AdjR2"
+  final_result <- rbind(final_result, result)
+  
+  write.csv(final_result, "neuro_traumaPC_associations.csv")
+
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### SUBTRAUMA CORRELATIONS  
+
+Im curious to see how the 1st PCs of the 3 different subttraumas correlate with one another!  
+
+```{r, eval=FALSE}
+
+####################
+# reading in data  #
+####################
+
+ctpc <- read.csv("CT_pcs.csv", header=T)
+atpc <- read.csv("AT_pcs.csv", header=T)
+catpc <- read.csv("CAT_pcs.csv", header=T)
+
+#this is to identify ps who have responded to all trauma questions!
+tpc <- read.csv("trauma_pcs.csv", header=T)
+id <- tpc[,c(2,2)] #the fid column
+      
+ctpc <- merge(id, ctpc, by="f.eid")
+atpc <- merge(id, atpc, by="f.eid")
+catpc <- merge(id, catpc, by="f.eid")
+
+cor.test(ctpc$PC1, atpc$PC1)
+cor.test(ctpc$PC1, catpc$PC1)
+cor.test(atpc$PC1, catpc$PC1)
+
+
+```
+
+![](subtrauma_correlations.png)
+
+## FULL OVERLAP SAMPLE  
+
+We need to make sure ps have data on either broad depression, cidi depression or neuroticism be included in the potential total analysis sample. We also want to make sure our participants have complete covariate data and have not requested to have their data removed from analyses!  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+# read in broad depression fields
+
+broad <- read.table("broad_fields", header=T) # n = 486165
+broad <- broad %>%
+         select(f.eid, broad = case)
+
+# read in cidi depression df
+
+cidi <- read.table("cidi_df", header=T) # n = 128927
+cidi <- cidi %>%
+        rename(cidi = case)
+
+# read in neuroticism
+
+neuro <- read.table("neuro_df", header=T) # n = 401663
+neuro <- neuro %>%
+         rename(neuro = f.20127.0.0)
+
+# read in ct fields
+ct <- read.table("ct_fields", header=T) #n = 502639
+ct <- ct %>%
+      mutate(ct_missing = is.na(f.20489.0.0) & is.na(f.20488.0.0) & is.na(f.20487.0.0) & is.na(f.20490.0.0) & is.na(f.20491.0.0))
+
+# read in at fields
+
+at <- read.table("at_fields", header=T) #n = 502639
+at <- at %>%
+      mutate(at_missing = is.na(f.20522.0.0) & is.na(f.20523.0.0) & is.na(f.20521.0.0) & is.na(f.20524.0.0) & is.na(f.20525.0.0))
+
+# read in cat fields
+
+cat <- read.table("cat_fields", header=T) #n = 502639
+cat <- cat %>%
+       mutate(cat_missing = is.na(f.20531.0.0) & is.na(f.20529.0.0) & is.na(f.20526.0.0) & is.na(f.20530.0.0) & is.na(f.20528.0.0) & is.na(f.20527.0.0))
+
+# merging all above files to form overlap
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="f.eid", all.x=TRUE, all.y=TRUE), list(broad, cidi, neuro, ct, at, cat)) # n = 502639
+
+# we need to remove all ps who have NO trauma information 
+
+df <- df %>%
+      filter(ct_missing == FALSE,
+             at_missing == FALSE,
+             cat_missing == FALSE) # n = 157221
+
+overlap_ids <- df[,c(1,1)]
+write.csv(overlap_ids, "total_sample_IDs", row.names=F, quote=F)
+
+# we need to make sure all ps have complete covariate data and none of the ps wanted their data to be removed  
+
+cov <- read.table("covariates", header=T) # n = 457440
+colnames(cov)[1] <- "f.eid"
+
+withdrawal <- read.csv("w4844_20200820.csv", header=F)
+
+df <- df %>%
+      inner_join(., cov, by="f.eid", all=FALSE) %>%
+      mutate(withdraw = f.eid %in% withdrawal$V1)
+
+# n = 148129
+# no participants have requested their data be removed from the UKB sample  
+
+gxe_keepIDS <- df[,c(1,1)]
+write.table(gxe_keepIDS, "gxe_keepIDs.txt", row.names=F, col.names=F)  
+
+```
+
+We have quite a large total sample size n = 148,129, so creating a GRM on this many people is likely to be impossible. We will need to break this sample up in a coherent manner.  
+
+We can look at centres!
+
+```{r, eval=FALSE}
+
+centre <- cov[,c(1,3)]
+colnames(centre)[1] <- "f.eid"
+
+keep_sample <- merge(gxe_keepIDS, centre, by="f.eid")
+
+centre_samples <- as.data.frame(table(keep_sample$centre))
+write.csv(centre_samples, "centre_analysis_sample.csv")
+
+# create the above map
+
+library(ggplot2)
+library(rgdal)
+library(dplyr)
+
+recruit <- readRDS("Recruitment.rds")
+
+verbal <- readRDS("VerbalInterview.rds")
+
+ukgrid <- "+init=epsg:27700"
+latlong <- "+init=epsg:4326"
+
+birthplace <- as_data_frame(verbal) %>%
+select(f.eid, birthplace_east=f.130.0.0,
+              birthplace_north=f.129.0.0) %>%
+left_join(recruit %>% select(f.eid, home_east=f.20074.0.0, home_north=f.20075.0.0), by='f.eid') %>% filter(!is.na(birthplace_east) & !is.na(birthplace_north)) %>%
+filter(birthplace_east != -1 & birthplace_north != -1) 
+
+birthplace_centre <- merge(keep_sample, birthplace, by="f.eid") # n = 136836
+
+birth_coords <- birthplace %>% select(Easting=birthplace_east, Northing=birthplace_north)
+
+plot1 <- ggplot(birthplace_centre, aes(x=home_east, y=home_north, colour=centre)) +
+geom_point() +
+xlab("East Coordinate") + ylab("North Coordinate") + labs(colour="Centre") + 
+theme_bw()
+
+ggsave(file="test.svg", plot=plot1, width=10, height=10)
+ggsave(file="test.png", plot=plot1, width=10, height=10)
+
+```
+
+There are clear visual clusters; North, Middle North, Middle South, South West and South East. Will go ahead and create these 'sub groups'.
+
+![](analysis_sample_location_clusters.png)  
+
+```{r, eval=FALSE}
+keep_sample$centre <- as.character(keep_sample$centre)
+
+#specify clusters
+
+north <- c("Glasgow", "Edinburgh", "Newcastle", "Middlesborough")
+keep_sample$north <- keep_sample$centre %in% north
+
+mid_north <- c("Leeds", "Bury", "Manchester", "Liverpool")
+keep_sample$mid_north <- keep_sample$centre %in% mid_north
+
+mid_south <- c("Wrexham", "Stoke", "StockportPilot", "Sheffield", "Nottingham", "Birmingham")
+keep_sample$mid_south <- keep_sample$centre %in% mid_south
+
+south_west <- c("Swansea", "Cardiff", "Bristol")
+keep_sample$south_west <- keep_sample$centre %in% south_west
+
+south_east <- c("Oxford", "Reading", "Hounslow", "Croydon", "Barts")
+keep_sample$south_east <- keep_sample$centre %in% south_east
+
+#save these id's for binary plink file creation
+
+keep_sample_north <- keep_sample[keep_sample$north==TRUE,1:2]
+write.table(keep_sample_north, "gxe_keepIDs_north.txt", row.names=F, col.names=F, quote=F, sep=" ")
+
+keep_sample_midnorth <- keep_sample[keep_sample$mid_north==TRUE,1:2]
+write.table(keep_sample_midnorth, "gxe_keepIDs_midnorth.txt", row.names=F, col.names=F, quote=F, sep=" ")
+
+keep_sample_midsouth <- keep_sample[keep_sample$mid_south==TRUE,1:2]
+write.table(keep_sample_midsouth, "gxe_keepIDs_midsouth.txt", row.names=F, col.names=F, quote=F, sep=" ")
+
+keep_sample_southwest <- keep_sample[keep_sample$south_west==TRUE,1:2]
+write.table(keep_sample_southwest, "gxe_keepIDs_southwest.txt", row.names=F, col.names=F, quote=F, sep=" ")
+
+keep_sample_southeast <- keep_sample[keep_sample$south_east==TRUE,1:2]
+write.table(keep_sample_southeast, "gxe_keepIDs_southeast.txt", row.names=F, col.names=F, quote=F, sep=" ")
+
+```
+
+
