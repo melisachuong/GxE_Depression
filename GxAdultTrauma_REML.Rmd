@@ -1,0 +1,1225 @@
+---
+title: "GxAdultTrauma_reml"
+author: "Melisa Chuong"
+date: "02/08/2021"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# ANALYSIS SAMPLE:  
+
+Using the childhood trauma PCs we can identify who has complete CT data within our clusters  
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+#reading in full analysis sample id info 
+
+gxe_full_ids <- read.table("../../phenotypes/gxe_keepIDs.txt", header=F) # n = 148129
+gxe_full_ids <- gxe_full_ids %>%
+                select(FID = V1, IID = V2)
+
+#reading in childhood trauma principal components
+
+pcs <- read.csv("../../phenotypes/AT_pcs.csv", header=T) # n =  150939
+pcs <- pcs %>%
+       select(FID = f.eid, PC1:PC5)
+
+#combining full sample IDs with PC IDs to obtain the analysis sample with complete CT information
+total_analysis_sample <- pcs %>%
+                         inner_join(., gxe_full_ids, all=FALSE) # N = 142375
+
+write.table(total_analysis_sample, "AT_profile.txt", row.names=F, quote=F)
+
+#################################################
+# creating cluster specific _profile.txt files  #
+#################################################
+
+ids <- read.table("AT_profile.txt", header=T)
+
+#important to merge onto the gxeKEEP IDs as this will ensure the order of the ids are the same in both GRMs and ERMs!
+
+#creating profile.txt files for ERMs
+
+for (cluster in c("north", "midnorth", "midsouth", "southwest", "southeast")){
+  
+  cluster_ids <- read.table(paste0("../../phenotypes/gxe_keepIDs_", cluster, ".txt"), header=F)
+  colnames(cluster_ids) <- c("FID", "IID")
+
+  cluster_erm_ids <- merge(cluster_ids, ids, by=c("FID", "IID"))
+  write.table(cluster_erm_ids, paste0("AT_", cluster,"_profile.txt"), row.names=F, quote=F)
+}
+
+#north n = 25043
+#midnorth n = 30914
+#midsouth n = 29899
+#southwest n = 19246
+#southeast n = 37273
+
+
+#######################################
+# creating cluster specific id files  #
+#######################################
+
+#creating id files for GRMs because we need to make sure the SAME participants have GRMs and ERMs available
+
+for (cluster in c("north", "midnorth", "midsouth", "southwest", "southeast")){
+  
+  cluster_ids <- read.table(paste0("./AT_", cluster, "_profile.txt"), header=T)
+  cluster_ids <- cluster_ids[,c(1:2)]
+
+  write.table(cluster_ids, paste0("gxe_AT_keepIDs_", cluster,".txt"), col.names=F, row.names=F, quote=F)
+}
+
+```
+
+
+# CLUSTER DEMOGRAPHICS:  
+
+It is important to understand the age range, sex and case proportion within each cluster.
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+
+# basic covariates
+cov <- read.table("../phenotypes/covariates", header=T)
+cov <- cov[,c(1,2,4,5)] # keeping id, sex, age & array, n = 457440
+cov <- cov[, c(1,1:4)] #repeating FID to have a FID and IID col
+colnames(cov)[2] <- "IID"
+
+#dependent variables
+broad <- read.table("../phenotypes/broad_df", header=T)
+colnames(broad) <- c("FID", "BROAD")
+
+cidi <- read.table("../phenotypes/cidi_df", header=T)
+colnames(cidi) <- c("FID", "CIDI")
+
+neuro <- read.table("../phenotypes/neuro_df", header=T)
+colnames(neuro) <- c("FID", "NEURO")
+
+df <- Reduce(function(x,y) merge(x=x, y=y, by="FID", all.x=T, all.y=T), list(cov,broad,cidi,neuro)) # n = 501693
+
+#############
+#full sample#
+#############
+
+for( cluster in c("north", "midnorth", "midsouth", "southwest", "southeast")){
+
+ids <- read.table(paste0("./phenotypes/gxe_AT_keepIDs_", cluster, ".txt"), header=F)
+cluster_info <- ids %>%
+                rename(FID = V1,
+                       IID = V2) %>%
+                inner_join(., df, all.x=TRUE)
+
+dem <- data.frame(matrix(NA, nrow=6, ncol=4))  
+
+
+female <- subset(cluster_info, cluster_info$sex=="Female")
+male <- subset(cluster_info, cluster_info$sex=="Male")
+
+dem[1,] <- cbind(dim(cluster_info), NA, NA)
+dem[2,] <- cbind(table(cluster_info$sex), NA) #female, male
+dem[3,] <- cbind(summary(cluster_info$age)[c(1,4,6)], NA) #min, mean, max
+dem[4,] <- cbind(table(cluster_info[cluster_info$sex=="Female", 7])[2],
+                 table(cluster_info[cluster_info$sex=="Male", 7])[2],
+                 table(cluster_info[cluster_info$sex=="Female", 7])[1],
+                 table(cluster_info[cluster_info$sex=="Male", 7])[1])
+
+dem[5,] <- cbind(table(cluster_info[cluster_info$sex=="Female", 6])[2],
+                 table(cluster_info[cluster_info$sex=="Male", 6])[2],
+                 table(cluster_info[cluster_info$sex=="Female", 6])[1],
+                 table(cluster_info[cluster_info$sex=="Male", 6])[1])
+
+dem[6,] <- cbind(summary(female$NEURO)[4], 
+                 dim(female[complete.cases(female$NEURO),])[1],
+                 summary(male$NEURO)[4],
+                 dim(male[complete.cases(male$NEURO),])[1])
+
+write.csv(dem, paste0(cluster, "_FULL_AT_demographics.csv"), row.names=F)
+
+}
+
+```
+# GENOMIC RELATIONSHIP MATRICES: {.tabset}  
+
+## FULL SAMPLE GRMs 
+
+1. The first thing we need to do is create separate binary plink files for participants in the different geographical clusters
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, April 2021
+# Eddie UKB GRM Script
+
+#$ -N grm_bfile_plink
+#$ -cwd
+#$ -pe sharedmem 5 # number of cores
+#$ -l h_vmem=20G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/plink/1.90b4 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+plink --bfile ../../../UKBgenotype --keep ../phenotypes/gxe_AT_keepIDs_north.txt --make-bed --out analysis_sample_AT_north
+plink --bfile ../../../UKBgenotype --keep ../phenotypes/gxe_AT_keepIDs_midnorth.txt --make-bed --out analysis_sample_AT_midnorth
+plink --bfile ../../../UKBgenotype --keep ../phenotypes/gxe_AT_keepIDs_midsouth.txt --make-bed --out analysis_sample_AT_midsouth
+plink --bfile ../../../UKBgenotype --keep ../phenotypes/gxe_AT_keepIDs_southwest.txt --make-bed --out analysis_sample_AT_southwest
+plink --bfile ../../../UKBgenotype --keep ../phenotypes/gxe_AT_keepIDs_southeast.txt --make-bed --out analysis_sample_AT_southeast
+
+```
+2. We will now compute GRMs for each of our clusters specified. We have sample sizes ranging from 20,000-40,000, so this may require a lot of memory, depending on how you want to output your GRM (binary takes up less memory).
+
+The estimated maximum amount of memory used is ~10 GB, requesting a factor of 8 GB to avoid node allocation failure (remember to run the following script separately for each gcta code).
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, April 2021
+# Eddie UKB GRM Script
+
+#$ -N at_cluster_grm
+#$ -cwd
+#$ -pe sharedmem 5 # number of cores
+#$ -l h_vmem=8G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/gcta/1.91.4beta 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+gcta64 --bfile analysis_sample_AT_north --make-grm --out analysis_sample_AT_north --thread-num 5
+
+gcta64 --bfile analysis_sample_AT_midnorth --make-grm --out analysis_sample_AT_midnorth --thread-num 5
+
+gcta64 --bfile analysis_sample_AT_midsouth --make-grm --out analysis_sample_AT_midsouth --thread-num 5
+
+gcta64 --bfile analysis_sample_AT_southeast --make-grm --out analysis_sample_AT_southeast --thread-num 5
+
+gcta64 --bfile analysis_sample_AT_southwest --make-grm --out analysis_sample_AT_southwest --thread-num 5
+
+```
+## Reading GRMs  
+
+Binary format GRMs are created which can be difficult to read. However, the data from the binary files can be extracted and a list can be created entailing the diagonals (individual genomic relationships with themselves), offdiagonals (individual genomic relationships with others in the matrix), participant IDs and the number of SNPs shared/used to calculate genomic relationships.
+
+```{r}
+# script obtained from Carmen Amador 
+# this function creates a list of vectors including the diagonal, offdiagonal, ps ID and No. SNPs shared for each pair in the matrix
+
+ReadGRMBin=function(prefix,AllN=F,size=4){
+		
+		sum_i=function(i){
+		 return(sum(1:i))
+		}
+		
+		BinFileName=paste(prefix,".grm.bin",sep="")
+		NFileName=paste(prefix,".grm.N.bin",sep="")
+		IDFileName=paste(prefix,".grm.id",sep="")
+		id=read.table(IDFileName)
+		n=dim(id)[1]
+		BinFile=file(BinFileName,"rb");
+		grm=readBin(BinFile,n=n*(n+1)/2,what=numeric(0),size=size)
+		NFile=file(NFileName,"rb");
+		if(AllN==T){
+			N=readBin(NFile,n=n*(n+1)/2,what=numeric(0),size=size)
+		}
+		else	N=readBin(NFile,n=1,what=numeric(0),size=size)
+		i=sapply(1:n,sum_i)
+		return(list(diag=grm[i],off=grm[-i],id=id,N=N))
+}
+
+```
+
+## Relative Count from GRMs  
+
+We want to count the number of people who fall into different cryptic relatedness bins  
+
+```{r, eval=FALSE}
+
+for(cluster in c("north", "midnorth", "midsouth", "southwest", "southeast")){
+  
+  cluster <- ReadGRMBin(paste0("analysis_sample_AT_", cluster))
+  #creating different relative bins
+  first_degree <- cluster$off[cluster$off>=0.3 & cluster$off<0.6] 
+second_degree <- cluster$off[cluster$off>=0.2 & cluster$off<0.3] 
+third_degree <- cluster$off[cluster$off>=0.05 & cluster$off<0.2] 
+
+length(first_degree)
+length(second_degree)
+length(third_degree)
+length(cluster$diag)
+
+  cr <- matrix(NA, nrow=1, ncol=3)
+  cr[1,1] <- length(first_degree)
+  cr[1,2] <- length(second_degree)
+  cr[1,3] <- length(third_degree)
+  
+  write.csv(cr, paste0("cluster_relative_sample_", cluster, ".csv"))
+  rm(cluster)
+  
+}
+
+```
+## Computing GRM Principle Components  
+
+We only need to do this for the realised full sample genomic relatedness matrices.  
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, May 2021
+# Eddie UKB GRM Script
+
+#$ -N at_pca_analysis
+#$ -cwd
+#$ -pe sharedmem 12 # number of cores
+#$ -l h_vmem=16G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/gcta/1.91.4beta 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+#full sample
+
+gcta64 --grm ../analysis_sample_AT_north --pca 15 --out AT_north_pcs --thread-num 12
+gcta64 --grm ../analysis_sample_AT_midnorth --pca 15 --out AT_midnorth_pcs --thread-num 12
+gcta64 --grm ../analysis_sample_AT_midsouth --pca 15 --out AT_midsouth_pcs --thread-num 12
+gcta64 --grm ../analysis_sample_AT_southwest --pca 15 --out AT_southwest_pcs --thread-num 12
+gcta64 --grm ../analysis_sample_AT_southeast --pca 15 --out AT_southeast_pcs --thread-num 12
+
+```
+
+# ENVIRONMENTAL RELATIONSHIP MATRICES: {.tabset}
+
+## ERM Adult Trauma (5 Principal Components)  
+
+We need to convert our .txt file with FID, IID and trauma PC data into a bod file format so it can be used by OSCA  
+
+```
+#I am currently using a Linux machine, so will make use of the Linux executable of osca
+
+wget https://cnsgenomics.com/software/osca/download/osca_Linux.zip
+unzip osca_Linux.zip.
+
+#I also need to make sure my software is executable
+chmod u+x osca_Linux
+
+../../erm/osca_Linux --efile ../phenotypes/AT_north_profile.txt --make-bod --out AT_north
+
+../../erm/osca_Linux --efile ../phenotypes/AT_midnorth_profile.txt --make-bod --out AT_midnorth
+
+../../erm/osca_Linux --efile ../phenotypes/AT_midsouth_profile.txt --make-bod --out AT_midsouth
+
+../../erm/osca_Linux --efile ../phenotypes/AT_southwest_profile.txt --make-bod --out AT_southwest
+
+../../erm/osca_Linux --efile ../phenotypes/AT_southeast_profile.txt --make-bod --out AT_southeast
+
+```
+Using algorithm 1 environmental relationship matrices will be created. This algorthim standardises the data of each variable (in this case: principal components). The default is algorithm 1. This results in a matrix where the average of the diagonals is = 1.   
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, June 2021
+# Eddie UKB ERM Script
+
+#$ -N at_erm
+#$ -cwd
+#$ -pe sharedmem 5 # number of cores
+#$ -l h_vmem=8G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+
+# CREATING ORM FILES 
+
+../../erm/osca_Linux --befile AT_north --make-orm --out AT_north --thread-num 5
+
+../../erm/osca_Linux --befile AT_midnorth --make-orm --out AT_midnorth --thread-num 5
+
+../../erm/osca_Linux --befile AT_midsouth --make-orm --out AT_midsouth --thread-num 5
+
+../../erm/osca_Linux --befile AT_southwest --make-orm --out AT_southwest --thread-num 5
+
+../../erm/osca_Linux --befile AT_southeast --make-orm --out AT_southeast --thread-num 5
+
+```
+## ERM GCTA Compatability  
+
+In order for GCTA to read the binary erm file, we need to re-name the files from orm. to grm. as if they are genomic relationship matrices   
+```
+find . -depth -name "*.orm.bin" -exec sh -c 'f="{}"; mv -- "$f" "${f%.orm.bin}.grm.bin"' \;
+
+find . -depth -name "*.orm.id" -exec sh -c 'f="{}"; mv -- "$f" "${f%.orm.id}.grm.id"' \;
+
+find . -depth -name "*.orm.N.bin" -exec sh -c 'f="{}"; mv -- "$f" "${f%.orm.N.bin}.grm.N.bin"' \;
+
+```
+# MIXED LINEAR MODELS:  
+
+The REML approach is a particular form of maximum likelihood estimation that does not base estimates on a maximum likelihood fit of all the information, but instead uses a likelihood function calculated from a transformed set of data, so that nuisance parameters have no effect (Dodge, 2006). In the case of variance component estimation, the original data set is replaced by a set of contrasts calculated from the data, and the likelihood function is calculated from the probability distribution of these contrasts, according to the model for the complete data set.  
+
+In particular, REML is used as a method for fitting linear mixed models. In contrast to the earlier maximum likelihood estimation, REML can produce unbiased estimates of variance and covariance parameters (Baker). Outputs give estimates of variance components!  
+
+In this project I conduct MLM (method: REML) using GCTA (Yang et al., 2011) software. Here, we fit the relationship matrices as random effects - and the output computes the DV proportion of variance accounted for by the random effects. 
+
+## Mixed Linear Model Prerequisites {.tabset}  
+
+### MLM Covariates 
+
+It is important to include covariates such as AGE, SEX and the top Principle Components of the GRM in subsequent analyses. It is important to have an idea of demographic differences between the clusters.
+
+```{r, eval=FALSE}
+rm(list=ls())
+
+cov <- read.table("../../../../phenotypes/covariates", header=T)
+cov <- cov[,c(1:7)] #using all covariates barring PCs
+
+#FULL SAMPLE COVARIATES
+
+for(cluster in c("north", "midnorth", "midsouth", "southwest", "southeast")){
+  
+  ids <- read.table(paste0("../analysis_sample_AT_", cluster, ".grm.id"), header=F)
+  colnames(ids) <- c("FID", "IID")
+  
+  pcs <- read.table(paste0("AT_", cluster, "_pcs.eigenvec"), header=F)
+  colnames(pcs)[1:2] <- c("FID", "IID")
+  
+  covariates <- Reduce(function(x,y) merge(x=x,y=y, by=c("FID", "IID")), list(ids, cov, pcs))
+  
+  discrete <- covariates[,c(1:3,6)] #choosing ids, sex, and array
+  
+  quant <- covariates[,c(1:2,5,8:22)] #choosing ids, age, and pcs
+  
+  write.table(discrete, paste0("AT_", cluster, "_cov"), col.names=F, row.names=F, quote=F)
+  write.table(quant, paste0("AT_", cluster, "_q_cov"), col.names=F, row.names=F, quote=F)
+  
+}
+
+#I WILL ALSO EXPLORE THESE ANALYSES IN SEX-SPECIFIC SAMPLES 
+#So I need to remove sex from the covariates file
+
+for(cluster in c("north", "midnorth", "midsouth", "southwest", "southeast")){
+  
+cov <- read.table(paste0("AT_", cluster, "_cov"), header=F)
+
+cov <- cov[,-3] #removing sex column
+
+write.table(cov, paste0("AT_", cluster, "_cov2"), row.names=F, quote=F, col.names=F)
+
+}
+
+```
+
+
+
+### MLM Prevalence Rates  
+
+When we are dealing with non-continuous traits we need to specify a population prevalence rate (or incidence rate), so there are a few things we need to consider for our project - the 1st being that we are looking at 2 different definitions of depression; CIDI and BROAD. The prevalence rates of these 2 different definitions are different, especially as broad dep is more of a measure of psychological distress which also captures anxiety. However, there isnt a clear indication of prevalence rates (and differences) between the different definitions.  
+
+More importantly, we know there are prevalence rate differences between males and females - this is also important as I want to explore the effects in sex-specific samples as well. 
+
+UKB is a sample population, so I will use the prevalence rates of CIDI and BROAD depression available in the whole UKB sample as my prevalence rates throughout the analyses. (There are some limitations to this, for example, we know that the UKB is actually a very healthy sample, so prevalence rates within this population might not actually be a true representation of the prevalence rates)  
+
+```{r, eval=FALSE}
+
+################################
+##             BROAD          ##
+################################
+
+#lets obtain population prevalence 
+
+broad <- read.table("broad_df", header=T)
+# case = 171979 // control = 314186 //prev == 0.3537
+colnames(broad)[1] <- c("FID")
+
+cov <- read.table("covariates", header=T)
+cov <- cov[,1:2]
+
+df <- merge(broad, cov, by="FID") # n = 442911
+df_f <- subset(df, df$sex=="Female") # n = 239238
+# case = 103238 // control = 136000 // prev == 0.4315
+
+
+df_m <- subset(df, df$sex=="Male") # n = 203673
+# case = 55733 // control = 147940 // prev == 0.2736
+
+################################
+##            CIDI            ##
+################################
+
+cidi <- read.table("cidi_df", header=T)
+cidi <- cidi[,c(1,15)] # keeping f.eid and case status
+# case = 36482 // control = 92918 // prev == 0.2819
+colnames(cidi)[1] <- "FID"
+
+cov <- read.table("covariates", header=T)
+cov <- cov[,1:2]
+
+df <- merge(cidi, cov, by="FID") # n = 121877
+df_f <- subset(df, df$sex=="Female") # n = 67059
+# case = 23846 // control = 43213 // prev == 0.3556
+
+
+df_m <- subset(df, df$sex=="Male") # n = 54818
+# case = 10646 // control = 44172 // prev == 0.1942
+
+
+```
+
+
+## The 4 Main MLMs {.tabset}  
+
+$$ 1. DV \sim X\beta + G + \varepsilon $$  
+$$ 2. DV \sim X\beta + E + \varepsilon $$  
+$$ 3. DV \sim X\beta + G + E + \varepsilon $$  
+$$ 4. DV \sim X\beta + G + E + G.E + \varepsilon $$
+
+Where y is a n×1 vector of observed depression/neuroticism phenotypes; β is a vector of fixed effects (which include age, sex, genotyping array and the first 15 principal components of the full sample GRM) and X is its design matrix; G is a n×1 vector of SNP effects (representing additive genetic effects) with G ~ (0,GRMσ_GRM^2 ); E is a n×1 vector representing common environmental effects of adult trauma with E ~ (0,ERMσ_ERM^2 ); GxE is a n×1 vector representing interactions between genetic and trauma effects with GxE ~ (0,GRMxERMσ_GRMxERM^2 ); and ε is a n×1 vector of residual effects.  
+
+### Model 1   
+
+Here I will run a mixed linear model using REML; fitting the GRMs (whole sample) for each cluster as a random effect and covariates; AGE, SEX, GENOTYPING ARRAY and the top 15 PCs of the GRM as fixed effects. 
+
+Run the reml anlaysis  
+Remember this will be repeated for broad depression with prevalence 0.35, and neuroticism with no prevalence (continuous trait)
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, August 2021
+# Eddie UKB VCA Script
+
+#$ -N at_cidi_h2
+#$ -cwd
+#$ -pe sharedmem 8 # number of cores
+#$ -l h_vmem=16G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/gcta/1.91.4beta 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+gcta64 --grm ../../full_sample_grms/analysis_sample_AT_north --reml --pheno ../../../cidi.phen --out h2_AT_cidi_n --thread-num 8 --prevalence 0.28 --qcovar ../../full_sample_grms/pca/AT_north_q_cov --covar ../../full_sample_grms/pca/AT_north_cov --reml-est-fix
+
+gcta64 --grm ../../full_sample_grms/analysis_sample_AT_midnorth --reml --pheno ../../../cidi.phen --out h2_AT_cidi_mn --thread-num 8 --prevalence 0.28 --qcovar ../../full_sample_grms/pca/AT_midnorth_q_cov --covar ../../full_sample_grms/pca/AT_midnorth_cov --reml-est-fix
+
+gcta64 --grm ../../full_sample_grms/analysis_sample_AT_midsouth  --reml --pheno ../../../cidi.phen --out h2_AT_cidi_ms --thread-num 8 --prevalence 0.28 --qcovar ../../full_sample_grms/pca/AT_midsouth_q_cov --covar ../../full_sample_grms/pca/AT_midsouth_cov --reml-est-fix
+
+gcta64 --grm ../../full_sample_grms/analysis_sample_AT_southwest --reml --pheno ../../../cidi.phen --out h2_AT_cidi_sw --thread-num 8 --prevalence 0.28 --qcovar ../../full_sample_grms/pca/AT_southwest_q_cov --covar ../../full_sample_grms/pca/AT_southwest_cov --reml-est-fix
+
+gcta64 --grm ../../full_sample_grms/analysis_sample_AT_southeast  --reml --pheno ../../../cidi.phen --out h2_AT_cidi_se --thread-num 8 --prevalence 0.28 --qcovar ../../full_sample_grms/pca/AT_southeast_q_cov --covar ../../full_sample_grms/pca/AT_southeast_cov --reml-est-fix
+
+``` 
+
+### Model 2    
+
+Here I will run a mixed linear model using REML; fitting the ERM (whole sample) for each cluster as a random effect and covariates; AGE, SEX, GENOTYPING ARRAY and the top 10 PCs of the GRM as fixed effects. 
+
+The memory use ranged from ~40-50 GB, below is an example shell script for CIDI depression. Re-running the shell-script with cidi replaced with broad/neuro (and further removing the --prevalence command for neuroticism) will repeat the analysis for the other DVs.
+
+Run the reml analysis
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, MAY 2021
+# Eddie UKB VCA Script
+
+#$ -N at_c_erm_reml
+#$ -cwd
+#$ -pe sharedmem 10 # number of cores
+#$ -l h_vmem=16G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/gcta/1.91.4beta 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+gcta64 --grm ../../AT_north --reml --prevalence 0.28 --pheno ../../../cidi.phen --out h2_AT_cidi_erm_n --thread-num 10  --qcovar ../../../grm/full_sample_grms/pca/AT_north_q_cov --covar ../../../grm/full_sample_grms/pca/AT_north_cov --reml-est-fix --reml-priors 0 1  
+
+gcta64 --grm ../../AT_midnorth --reml --prevalence 0.28 --pheno ../../../cidi.phen --out h2_AT_cidi_erm_mn --thread-num 10 --qcovar ../../../grm/full_sample_grms/pca/AT_midnorth_q_cov --covar ../../../grm/full_sample_grms/pca/AT_midnorth_cov --reml-est-fix --reml-priors 0 1
+
+gcta64 --grm ../../AT_midsouth --reml --prevalence 0.28 --pheno ../../../cidi.phen --out h2_AT_cidi_erm_ms --thread-num 10 --qcovar ../../../grm/full_sample_grms/pca/AT_midsouth_q_cov --covar ../../../grm/full_sample_grms/pca/AT_midsouth_cov --reml-est-fix --reml-priors 0 1
+
+gcta64 --grm ../../AT_southwest --reml --prevalence 0.28 --pheno ../../../cidi.phen --out h2_AT_cidi_erm_sw --thread-num 10 --qcovar ../../../grm/full_sample_grms/pca/AT_southwest_q_cov --covar ../../../grm/full_sample_grms/pca/AT_southwest_cov --reml-est-fix --reml-priors 0 1
+
+gcta64 --grm ../../AT_southeast --reml --prevalence 0.28 --pheno ../../../cidi.phen --out h2_AT_cidi_erm_se --thread-num 10 --qcovar ../../../grm/full_sample_grms/pca/AT_southeast_q_cov --covar ../../../grm/full_sample_grms/pca/AT_southeast_cov --reml-est-fix --reml-priors 0 1
+
+```
+
+### Model 3  
+
+Here I will run a mixed linear model using REML; fitting the GRMs (full sample) and the ERM for each cluster as random effects and covariates; AGE, SEX, GENOTYPING ARRAY and the top 10 PCs of the GRM(full) as fixed effects.  
+
+Will create a txt file detailing the paths of the GRM and ERM
+
+```
+vi mgrm_G+E_north.txt
+```
+By typing 'i' (for insert) I add the following paths
+
+```
+../../AT_north
+../../../grm/full_sample_grms/analysis_sample_AT_north
+
+```
+To save and quite, press the 'esc' button and type 'wq' (write quit). 
+
+Run REML analysis
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, MAY 2021
+# Eddie UKB VCA Script
+
+#$ -N at_c_g+e_h2
+#$ -cwd
+#$ -pe sharedmem 10 # number of cores
+#$ -l h_vmem=16G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/gcta/1.91.4beta 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+gcta64 --mgrm mgrm_G+E_north.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_G+E_n --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_north_q_cov --covar ../../../grm/full_sample_grms/pca/AT_north_cov --reml-lrt 1 --reml-est-fix  
+
+gcta64 --mgrm mgrm_G+E_midnorth.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_G+E_mn --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_midnorth_q_cov --covar ../../../grm/full_sample_grms/pca/AT_midnorth_cov --reml-lrt 1 --reml-est-fix
+
+gcta64 --mgrm mgrm_G+E_midsouth.txt  --reml --pheno ../../../cidi.phen --out h2_AT_cidi_G+E_ms --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_midsouth_q_cov --covar ../../../grm/full_sample_grms/pca/AT_midsouth_cov --reml-lrt 1 --reml-est-fix
+
+gcta64 --mgrm mgrm_G+E_southwest.txt  --reml --pheno ../../../cidi.phen --out h2_AT_cidi_G+E_sw --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_southwest_q_cov --covar ../../../grm/full_sample_grms/pca/AT_southwest_cov --reml-lrt 1 --reml-est-fix
+
+gcta64 --mgrm mgrm_G+E_southeast.txt   --reml --pheno ../../../cidi.phen --out h2_AT_cidi_G+E_se --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_southeast_q_cov --covar ../../../grm/full_sample_grms/pca/AT_southeast_cov --reml-lrt 1 --reml-est-fix
+
+```
+
+### Model 4    
+
+I create a shell script (code provided by Carmen Amador) to specify which matrices to use for the final interaction matrix  
+
+Where NIND is the sample size of grm.id  
+G1 is the first matrix  
+G2 is the second matrix  
+Out is the name of the interaction matrix  
+
+Making sure all files are in the same directory will make this process run smoothly  
+Remember to run the following script for all clusters (just providing north as an example)
+
+vi RunHadamardP_at_north.sh
+
+```
+NIND=25590
+G1=$'analysis_sample_AT_north'
+G2=$'AT_north'
+Out=$'GxAT_north'
+
+./HadamardP $NIND $G1 $G2 $Out > $Out.log
+
+## WARNING
+## For Nind>>> the grm.N.bin file might be problematic, copy from G or E matrix:
+## cp $G1.grm.N.bin GxE_$Out.grm.N.bin
+
+```
+To create the interaction matrices
+
+```
+./RunHadamardP_north.sh
+
+```
+We need to copy the GRM.grm.N.bin files and save as GxCAT.grm.N.bin files - following warning provided by Carmen
+
+```
+cp analysis_sample_AT_north.grm.N.bin GxAT_north.grm.N.bin
+
+cp analysis_sample_AT_midnorth.grm.N.bin GxAT_midnorth.grm.N.bin
+
+cp analysis_sample_AT_midsouth.grm.N.bin GxAT_midsouth.grm.N.bin
+
+cp analysis_sample_AT_southwest.grm.N.bin GxAT_southwest.grm.N.bin
+
+cp analysis_sample_AT_southeast.grm.N.bin GxAT_southeast.grm.N.bin
+
+```
+Create a text file listing the pathway to the different relationship matrices  
+```
+vi mgrm_GxE_north.txt
+
+```
+By typing 'i' (for insert) I add the following paths
+
+```
+../alg1_files/analysis_sample_AT_north
+
+../alg1_files/AT_north
+
+../alg1_files/GxAT_north
+
+```
+
+Run the reml analysis
+
+```
+#!/bin/sh
+###########################################
+
+# M.Chuong, Edinburgh U.K, MAY 2021
+# Eddie UKB VCA Script
+
+#$ -N at_c_gxe_h2
+#$ -cwd
+#$ -pe sharedmem 10 # number of cores
+#$ -l h_vmem=16G # memory per core
+#$ -l h_rt=48:00:00 ## requested time
+#$ -m baes ## notifications: (b)begin/(a)aborted/(e)end/(s)suspended/(n)nomail
+#$ -M melisa.chuong@ed.ac.uk ## email for notifications
+
+# INITIALISE ENV MODULES
+. /etc/profile.d/modules.sh # if using modules need to add this line
+
+# LOAD THE MODULES
+module load igmm/apps/gcta/1.91.4beta 
+
+# CREATING NEW BINARY PLINK FILES TO CREATE GRMs
+
+gcta64 --mgrm mgrm_GxE_north.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_GxE_n --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_north_q_cov --covar ../../../grm/full_sample_grms/pca/AT_north_cov --reml-lrt 3 --reml-est-fix  
+
+gcta64 --mgrm mgrm_GxE_midnorth.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_GxE_mn --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_midnorth_q_cov --covar ../../../grm/full_sample_grms/pca/AT_midnorth_cov --reml-lrt 3 --reml-est-fix
+
+gcta64 --mgrm mgrm_GxE_midsouth.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_GxE_ms --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_midsouth_q_cov --covar ../../../grm/full_sample_grms/pca/AT_midsouth_cov --reml-lrt 3 --reml-est-fix
+
+gcta64 --mgrm mgrm_GxE_southwest.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_GxE_sw --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_southwest_q_cov --covar ../../../grm/full_sample_grms/pca/AT_southwest_cov --reml-lrt 3 --reml-est-fix
+
+gcta64 --mgrm mgrm_GxE_southeast.txt --reml --pheno ../../../cidi.phen --out h2_AT_cidi_GxE_se --thread-num 10 --prevalence 0.28 --qcovar ../../../grm/full_sample_grms/pca/AT_southeast_q_cov --covar ../../../grm/full_sample_grms/pca/AT_southeast_cov --reml-lrt 3 --reml-est-fix
+
+```
+### Meta-analyses  
+
+As analyses are replicated across different clusters, we need to meta-analyse results  
+
+```{r, eval = FALSE}
+ 
+# This is a semi-automatic script, file paths need to be changed accordingly  
+
+                ####################################################
+                # SINGLE RANDOM EFFECT (AKA 1 RELATIONSHIP MATRIX) #
+                ####################################################
+
+# Will be using 'metafor' package to run the meta-analyses
+# We will be using a fixed-effects model using the inverse-variance weighting formula
+
+library(metafor)
+
+# Remember we can have different samples e.g. Full, Unrelated, Female, Male
+# Remember we can have different models e.g. GRM, ERM, G+E, G+E+GxE
+# Remember we can have different forms of ERMs e.g. 16traumaPCs, 1traumaPC, traumaPCresidualised, ct, at, cat
+
+rm(list=ls())
+
+sample <- "UNRELATED_FEMALE" #remember to change this when looking at different samples
+model <- "ERM" #remember to change this when looking at different models
+E <- "TRAUMA"
+
+# Will be using different scripts for broad & cidi depression as these are converted to the liability scale
+
+    for (depvar in c("broad", "cidi")){
+    
+    # creating a df with 3 columns; prefix (aka cluster), variance (aka beta estimate), SE (standard error)
+    ov <- as.data.frame(matrix(NA, nrow=1, ncol=3))
+    colnames(ov) <- c("prefix", "Variance", "SE")
+    
+    for(prefix in c("n", "mn", "ms", "sw", "se")){ #clusters
+      
+      #below I read in the REML analysis output for the specific cluster and DV
+      hsq <- read.delim(paste0("../erm/reml_full/SexSpecific_unrelated/h2_female_", depvar, "_erm_", prefix, ".hsq"))
+      
+      #below I extract the H2 (aka the proportion of variance accounted for by the relationship matrix) from the result output
+      #the file obtains the cluster, beta estimate(variance) and SE values
+      hsq_info <- cbind(prefix, hsq[7,2:3])
+      ov <- rbind(ov, hsq_info)
+    }
+    ov <- ov[-1,] #removing the NA rows which were formed when creating the DF
+    
+    #now I will run the meta-analysis, below I specify the type of data we will be meta-analysing (yi for estimates, sei for standard errors)
+    dat <- escalc(measure="RR", yi=Variance, sei=SE, data=ov)
+    
+    #running the fixed effects meta-analysis using inverse-variance weighting!
+    meta <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat))
+    
+    #combining info on the sample, model, variance component, DV, and the meta-analyses proportion of variance
+    meta_info <- cbind(sample, model, "GRM", E, depvar, meta$beta, meta$se, meta$pval, meta$ci.lb, meta$ci.ub)
+    colnames(meta_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+ 
+    #should aim to make resulting file as informative as possible!   
+    write.csv(meta_info, paste0(depvar, "_", sample, "_", model, "_", E, "_meta_VCA_info.csv"), row.names=F)
+  
+    }
+    
+# Scripts will be slightly different for neuroticisim results as this is not converted to the liability scale (continuous trait), so row numbers are slightly different
+
+    depvar <- "neuro"
+    
+    ov <- as.data.frame(matrix(NA, nrow=1, ncol=3))
+    colnames(ov) <- c("prefix", "Variance", "SE")
+    
+    for(prefix in c("n", "mn", "ms", "sw", "se")){ #clusters
+      hsq <- read.delim(paste0("../erm/reml_full/SexSpecific_unrelated/h2_female_", depvar, "_erm_", prefix, ".hsq"))
+      hsq_info <- cbind(prefix, hsq[4,2:3]) #row 4 is what we need!
+      ov <- rbind(ov, hsq_info)
+    }
+    
+    ov <- ov[-1,] 
+    
+    dat <- escalc(measure="RR", yi=Variance, sei=SE, data=ov)
+    meta <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat))
+    meta_info <- cbind(sample, model, "GRM", E, depvar, meta$beta, meta$se, meta$pval, meta$ci.lb, meta$ci.ub)
+    colnames(meta_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+    
+    write.csv(meta_info, paste0(depvar, "_",  sample, "_", model, "_", E, "_meta_VCA_info.csv"), row.names=F)
+  
+                ####################################################
+                # TWO RANDOM EFFECTS (AKA 2 RELATIONSHIP MATRICES) #
+                ####################################################    
+    
+    library(metafor)
+    
+    # Remember we can have different samples e.g. Full, Unrelated, Female, Male
+    # Remember we can have different models e.g. GRM, ERM, G+E, G+E+GxE
+    # Remember we can have different forms of ERMs e.g. 16traumaPCs, 1traumaPC, traumaPCresidualised, ct, at, cat
+    
+    rm(list=ls())
+    
+    sample <- "UNRELATED_MALE" #remember to change this when looking at different samples
+    model <- "G+E" #remember to change this when looking at different models
+    E <- "TRAUMAPC"
+    
+# Will be using different scripts for broad & cidi depression as these are converted to the liability scale
+    
+    for (depvar in c("broad", "cidi")){
+      
+      # creating a df with 3 columns; prefix (aka cluster), variance (aka beta estimate), SE (standard error)
+      ov <- as.data.frame(matrix(NA, nrow=1, ncol=4))
+      colnames(ov) <- c("prefix", "VARCOMP", "Variance", "SE")
+      
+      for(prefix in c("n", "mn", "ms", "sw", "se")){ #clusters
+        
+        #below I read in the REML analysis output for the specific cluster and DV
+        hsq <- read.delim(paste0("../erm/reml_G+E/SexSpecific_unrelated/h2_male_", depvar, "_G+E_", prefix, ".hsq"))
+        
+        #below I extract the H2 (aka the proportion of variance accounted for by the relationship matrices) from the result output
+        #the file obtains the cluster, beta estimate(variance) and SE values
+        hsq_E <- cbind(prefix, "ERM", hsq[10,2:3])
+        colnames(hsq_E)[2] <- "VARCOMP"
+        hsq_G <- cbind(prefix, "GRM",  hsq[11,2:3])
+        colnames(hsq_G)[2] <- "VARCOMP"
+        
+        ov <- Reduce(function(x,y) rbind(x=x,y=y), list(ov, hsq_E, hsq_G))
+      }
+      ov <- ov[-1,] #removing the NA rows which were formed when creating the DF
+      
+      #subsetting based on variance components!
+      ov1 <- subset(ov, ov$VARCOMP=="GRM")
+      ov2 <- subset(ov, ov$VARCOMP=="ERM")
+      
+      #now I will run the meta-analysis, below I specify the type of data we will be meta-analysing (yi for estimates, sei for standard errors)
+      dat1 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov1) #GRM
+      dat2 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov2) #ERM
+      
+      #running the fixed effects meta-analysis using inverse-variance weighting!
+      meta1 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat1))
+      meta2 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat2))
+      
+      #combining info on the sample, model, variance component, DV, and the meta-analyses proportion of variance
+      meta1_info <- cbind(sample, model, "GRM", E, depvar, meta1$beta, meta1$se, meta1$pval, meta1$ci.lb, meta1$ci.ub)
+      colnames(meta1_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+
+      meta2_info <- cbind(sample, model, "ERM", E, depvar, meta2$beta, meta2$se, meta2$pval, meta2$ci.lb, meta2$ci.ub)
+      colnames(meta2_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+      
+      meta_info <- rbind(meta1_info, meta2_info)
+      
+      #should aim to make resulting file as informative as possible!   
+      write.csv(meta_info, paste0(depvar, "_", sample, "_", model, "_", E, "_meta_VCA_info.csv"), row.names=F)
+      
+    }
+    
+# Scripts will be slightly different for neuroticisim results as this is not converted to the liability scale (continuous trait), so row numbers are slightly different
+    
+      depvar <- "neuro"
+      
+      # creating a df with 3 columns; prefix (aka cluster), variance (aka beta estimate), SE (standard error)
+      ov <- as.data.frame(matrix(NA, nrow=1, ncol=4))
+      colnames(ov) <- c("prefix", "VARCOMP", "Variance", "SE")
+      
+      for(prefix in c("mn", "ms", "sw", "se")){ #clusters
+        
+        #below I read in the REML analysis output for the specific cluster and DV
+        hsq <- read.delim(paste0("../erm/reml_G+E/SexSpecific_unrelated/h2_male_", depvar, "_G+E_", prefix, ".hsq"))
+        
+        #below I extract the H2 (aka the proportion of variance accounted for by the relationship matrices) from the result output
+        #the file obtains the cluster, beta estimate(variance) and SE values
+        hsq_E <- cbind(prefix, "ERM", hsq[5,2:3])
+        colnames(hsq_E)[2] <- "VARCOMP"
+        hsq_G <- cbind(prefix, "GRM",  hsq[6,2:3])
+        colnames(hsq_G)[2] <- "VARCOMP"
+        
+        ov <- Reduce(function(x,y) rbind(x=x,y=y), list(ov, hsq_E, hsq_G))
+      }
+      ov <- ov[-1,] #removing the NA rows which were formed when creating the DF
+      
+      #subsetting based on variance components!
+      ov1 <- subset(ov, ov$VARCOMP=="GRM")
+      ov2 <- subset(ov, ov$VARCOMP=="ERM")
+      
+      #now I will run the meta-analysis, below I specify the type of data we will be meta-analysing (yi for estimates, sei for standard errors)
+      dat1 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov1) #GRM
+      dat2 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov2) #ERM
+      
+      #running the fixed effects meta-analysis using inverse-variance weighting!
+      meta1 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat1))
+      meta2 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat2))
+      
+      #combining info on the sample, model, variance component, DV, and the meta-analyses proportion of variance
+      meta1_info <- cbind(sample, model, "GRM", E, depvar, meta1$beta, meta1$se, meta1$pval, meta1$ci.lb, meta1$ci.ub)
+      colnames(meta1_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+      
+      meta2_info <- cbind(sample, model, "ERM", E, depvar, meta2$beta, meta2$se, meta2$pval, meta2$ci.lb, meta2$ci.ub)
+      colnames(meta2_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+      
+      meta_info <- rbind(meta1_info, meta2_info)
+      
+      #should aim to make resulting file as informative as possible!   
+      write.csv(meta_info, paste0(depvar, "_", sample, "_", model, "_", E, "_meta_VCA_info.csv"), row.names=F)
+
+      ######################################################
+      # THREE RANDOM EFFECTS (AKA 3 RELATIONSHIP MATRICES) #
+      ######################################################   
+      
+      library(metafor)
+      
+      # Remember we can have different samples e.g. Full, Unrelated, Female, Male
+      # Remember we can have different models e.g. GRM, ERM, G+E, G+E+GxE
+      # Remember we can have different forms of ERMs e.g. 16traumaPCs, 1traumaPC, traumaPCresidualised, ct, at, cat
+      
+      rm(list=ls())
+      
+      sample <- "UNRELATED_FEMALE" #remember to change this when looking at different samples
+      model <- "GxE" #remember to change this when looking at different models
+      E <- "TRAUMAPC"
+      
+# Will be using different scripts for broad & cidi depression as these are converted to the liability scale
+      for (depvar in c("broad", "cidi")){
+        
+        # creating a df with 3 columns; prefix (aka cluster), variance (aka beta estimate), SE (standard error)
+        ov <- as.data.frame(matrix(NA, nrow=1, ncol=4))
+        colnames(ov) <- c("prefix", "VARCOMP", "Variance", "SE")
+        
+        for(prefix in c("n", "mn", "ms", "sw", "se")){ #clusters
+          
+          #below I read in the REML analysis output for the specific cluster and DV
+          hsq <- read.delim(paste0("../erm/reml_GxE/SexSpecific_unrelated/h2_female_", depvar, "_GxE_", prefix, ".hsq"))
+          
+          #below I extract the H2 (aka the proportion of variance accounted for by the relationship matrices) from the result output
+          #the file obtains the cluster, beta estimate(variance) and SE values
+          hsq_G <- cbind(prefix, "GRM", hsq[12,2:3])
+          colnames(hsq_G)[2] <- "VARCOMP"
+          hsq_E <- cbind(prefix, "ERM",  hsq[13,2:3])
+          colnames(hsq_E)[2] <- "VARCOMP"
+          hsq_GE <- cbind(prefix, "GxE",  hsq[14,2:3])
+          colnames(hsq_GE)[2] <- "VARCOMP"
+          
+          ov <- Reduce(function(x,y) rbind(x=x,y=y), list(ov, hsq_G, hsq_E, hsq_GE))
+        }
+        ov <- ov[-1,] #removing the NA rows which were formed when creating the DF
+        
+        #subsetting based on variance components!
+        ov1 <- subset(ov, ov$VARCOMP=="GRM")
+        ov2 <- subset(ov, ov$VARCOMP=="ERM")
+        ov3 <- subset(ov, ov$VARCOMP=="GxE")
+        
+        #now I will run the meta-analysis, below I specify the type of data we will be meta-analysing (yi for estimates, sei for standard errors)
+        dat1 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov1) #GRM
+        dat2 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov2) #ERM
+        dat3 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov3) #GRMxERM
+        
+        #running the fixed effects meta-analysis using inverse-variance weighting!
+        meta1 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat1))
+        meta2 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat2))
+        meta3 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat3))
+        
+        #combining info on the sample, model, variance component, DV, and the meta-analyses proportion of variance
+        meta1_info <- cbind(sample, model, "GRM", E, depvar, meta1$beta, meta1$se, meta1$pval, meta1$ci.lb, meta1$ci.ub)
+        colnames(meta1_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+        
+        meta2_info <- cbind(sample, model, "ERM", E, depvar, meta2$beta, meta2$se, meta2$pval, meta2$ci.lb, meta2$ci.ub)
+        colnames(meta2_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+
+        meta3_info <- cbind(sample, model, "GxE", E, depvar, meta3$beta, meta3$se, meta3$pval, meta3$ci.lb, meta3$ci.ub)
+        colnames(meta3_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+        
+        meta_info <- Reduce(function(x,y) rbind(x=x,y=y), list(meta1_info, meta2_info, meta3_info))
+        
+        #should aim to make resulting file as informative as possible!   
+        write.csv(meta_info, paste0(depvar, "_", sample, "_", model, "_", E, "_meta_VCA_info.csv"), row.names=F)
+        
+      }
+
+# Scripts will be slightly different for neuroticisim results as this is not converted to the liability scale (continuous trait), so row numbers are slightly different
+      
+      depvar <- "neuro"
+        
+        # creating a df with 3 columns; prefix (aka cluster), variance (aka beta estimate), SE (standard error)
+        ov <- as.data.frame(matrix(NA, nrow=1, ncol=4))
+        colnames(ov) <- c("prefix", "VARCOMP", "Variance", "SE")
+        
+        for(prefix in c("n", "mn", "ms", "sw", "se")){ #clusters
+          
+          #below I read in the REML analysis output for the specific cluster and DV
+          hsq <- read.delim(paste0("../erm/reml_GxE/SexSpecific_unrelated/h2_female_", depvar, "_GxE_", prefix, ".hsq"))
+          
+          #below I extract the H2 (aka the proportion of variance accounted for by the relationship matrices) from the result output
+          #the file obtains the cluster, beta estimate(variance) and SE values
+          hsq_G <- cbind(prefix, "GRM", hsq[6,2:3])
+          colnames(hsq_G)[2] <- "VARCOMP"
+          hsq_E <- cbind(prefix, "ERM",  hsq[7,2:3])
+          colnames(hsq_E)[2] <- "VARCOMP"
+          hsq_GE <- cbind(prefix, "GxE",  hsq[8,2:3])
+          colnames(hsq_GE)[2] <- "VARCOMP"
+          
+          ov <- Reduce(function(x,y) rbind(x=x,y=y), list(ov, hsq_G, hsq_E, hsq_GE))
+        }
+        ov <- ov[-1,] #removing the NA rows which were formed when creating the DF
+        
+        #subsetting based on variance components!
+        ov1 <- subset(ov, ov$VARCOMP=="GRM")
+        ov2 <- subset(ov, ov$VARCOMP=="ERM")
+        ov3 <- subset(ov, ov$VARCOMP=="GxE")
+        
+        #now I will run the meta-analysis, below I specify the type of data we will be meta-analysing (yi for estimates, sei for standard errors)
+        dat1 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov1) #GRM
+        dat2 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov2) #ERM
+        dat3 <- escalc(measure="RR", yi=Variance, sei=SE, data=ov3) #GRMxERM
+        
+        #running the fixed effects meta-analysis using inverse-variance weighting!
+        meta1 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat1))
+        meta2 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat2))
+        meta3 <- summary(rma.uni(as.numeric(yi), as.numeric(vi), method="FE", data=dat3))
+        
+        #combining info on the sample, model, variance component, DV, and the meta-analyses proportion of variance
+        meta1_info <- cbind(sample, model, "GRM", E, depvar, meta1$beta, meta1$se, meta1$pval, meta1$ci.lb, meta1$ci.ub)
+        colnames(meta1_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+        
+        meta2_info <- cbind(sample, model, "ERM", E, depvar, meta2$beta, meta2$se, meta2$pval, meta2$ci.lb, meta2$ci.ub)
+        colnames(meta2_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+        
+        meta3_info <- cbind(sample, model, "GxE", E, depvar, meta3$beta, meta3$se, meta3$pval, meta3$ci.lb, meta3$ci.ub)
+        colnames(meta3_info) <- c("SAMPLE", "MODEL", "VARCOMP", "E", "DV", "METAH2", "METASE", "METAPVAL", "METACIlb", "METACIub")  
+        
+        meta_info <- Reduce(function(x,y) rbind(x=x,y=y), list(meta1_info, meta2_info, meta3_info))
+        
+        #should aim to make resulting file as informative as possible!   
+        write.csv(meta_info, paste0(depvar, "_", sample, "_", model, "_", E, "_meta_VCA_info.csv"), row.names=F)
+        
+```
+
+### Collate Results  
+
+I want to extract and collate all the important estimates from the MLM analyses. I have 5 different clusters, so each analysis is replicated 5 times. More importantly, depending on the model, the number of estimates that are important changes. Results are outputted into files with prefix .hsq  
+
+The following script will work from Model 1 and Model 2 results - here we need to change the name of the hsq file to keep in line with the files we are interested in.  
+
+```{r, eval=FALSE}
+
+# Here I have a semi-automated script
+# I need to specify the sample and the what the ERM represents
+# I also need to adjust the script with the relevant paths for the files 
+# e.g. ../grm/full_sample_grms/analysis_sample would be the full sample GRMs
+
+rm(list=ls())
+
+sample <- "UNRELATED_MALE"
+E <- "TRAUMA"
+
+################################
+#   CIDI & BROAD DEPRESSION    #   
+################################
+
+for(depvar in c("broad", "cidi")){
+  for(prefix in c("n", "mn", "ms", "sw", "se")){
+
+#creating a dataframe ov, overview file
+ov <- as.data.frame(matrix(NA, nrow=1, ncol=5))
+colnames(ov) <- c("prefix", "Variance", "SE", "LRT", "LRT-P")
+
+# reading in GRM model results
+Ghsq <- read.delim(paste0("../grm/reml_full/SexSpecific_unrelated/h2_male_", depvar, "_", prefix, ".hsq"))
+Ghsq_info <- cbind(prefix, Ghsq[7,2:3], Ghsq[10,2], Ghsq[12,2])
+colnames(Ghsq_info)[4:5] <- c("LRT", "LRT-P")
+
+# reading in ERM model results
+Ehsq <- read.delim(paste0("../erm/reml_full/SexSpecific_unrelated/h2_male_", depvar, "_erm_", prefix, ".hsq"))
+Ehsq_info <- cbind(prefix, Ehsq[7,2:3], Ehsq[10,2], Ehsq[12,2])
+colnames(Ehsq_info)[4:5] <- c("LRT", "LRT-P")
+
+# reading in GRM + ERM model results
+G_Ehsq <- read.delim(paste0("../erm/reml_G+E/SexSpecific_unrelated/h2_male_", depvar, "_G+E_", prefix, ".hsq"))
+G_Ehsq_info1 <- cbind(prefix, G_Ehsq[11,2:3], NA, NA)
+colnames(G_Ehsq_info1)[4:5] <- c("LRT", "LRT-P")
+G_Ehsq_info2 <- cbind(prefix, G_Ehsq[10,2:3], G_Ehsq[15,2], G_Ehsq[17,2])
+colnames(G_Ehsq_info2)[4:5] <- c("LRT", "LRT-P")
+G_Ehsq_info <- rbind(G_Ehsq_info1, G_Ehsq_info2)
+
+# reading in GRM + ERM + GRMxERM results
+GxEhsq <- read.delim(paste0("../erm/reml_GxE/SexSpecific_unrelated/h2_male_", depvar, "_GxE_", prefix, ".hsq"))
+GxEhsq_info1 <- cbind(prefix, GxEhsq[12,2:3], NA, NA)
+colnames(GxEhsq_info1)[4:5] <- c("LRT", "LRT-P")
+GxEhsq_info2 <- cbind(prefix, GxEhsq[13,2:3], NA, NA)
+colnames(GxEhsq_info2)[4:5] <- c("LRT", "LRT-P")
+GxEhsq_info3 <- cbind(prefix, GxEhsq[14,2:3], GxEhsq[18,2], GxEhsq[20,2])
+colnames(GxEhsq_info3)[4:5] <- c("LRT", "LRT-P")
+GxEhsq_info <- Reduce(function(x,y) rbind(x=x,y=y), list(GxEhsq_info1, GxEhsq_info2, GxEhsq_info3))
+
+#combine all results
+allinfo <- Reduce(function(x,y) rbind(x=x,y=y), list(Ghsq_info, Ehsq_info, G_Ehsq_info, GxEhsq_info))
+write.csv(allinfo, paste0(sample, "_", E, "_", depvar, "_VCA_results_", prefix, ".csv"), row.names=F)
+}}
+
+################################
+#         NEUROTICISM          #   
+################################
+
+depvar <- "neuro"
+
+for(prefix in c("n", "mn", "ms", "sw", "se")){
+    
+#creating a dataframe ov, overview file
+ov <- as.data.frame(matrix(NA, nrow=1, ncol=5))
+colnames(ov) <- c("prefix", "Variance", "SE", "LRT", "LRT-P")
+    
+# reading in GRM model results
+Ghsq <- read.delim(paste0("../grm/reml_full/SexSpecific_unrelated/h2_male_", depvar, "_", prefix, ".hsq"))
+Ghsq_info <- cbind(prefix, Ghsq[4,2:3], Ghsq[7,2], Ghsq[9,2])
+colnames(Ghsq_info)[4:5] <- c("LRT", "LRT-P")
+    
+# reading in ERM model results
+Ehsq <- read.delim(paste0("../erm/reml_full/SexSpecific_unrelated/h2_male_", depvar, "_erm_", prefix, ".hsq"))
+Ehsq_info <- cbind(prefix, Ehsq[4,2:3], Ehsq[7,2], Ehsq[9,2])
+colnames(Ehsq_info)[4:5] <- c("LRT", "LRT-P")
+  
+# reading in GRM + ERM model results
+G_Ehsq <- read.delim(paste0("../erm/reml_G+E/SexSpecific_unrelated/h2_male_", depvar, "_G+E_", prefix, ".hsq"))
+G_Ehsq_info1 <- cbind(prefix, G_Ehsq[6,2:3], NA, NA)
+colnames(G_Ehsq_info1)[4:5] <- c("LRT", "LRT-P")
+G_Ehsq_info2 <- cbind(prefix, G_Ehsq[5,2:3], G_Ehsq[10,2], G_Ehsq[12,2])
+colnames(G_Ehsq_info2)[4:5] <- c("LRT", "LRT-P")
+G_Ehsq_info <- rbind(G_Ehsq_info1, G_Ehsq_info2)
+    
+# reading in GRM + ERM + GRMxERM results
+GxEhsq <- read.delim(paste0("../erm/reml_GxE/SexSpecific_unrelated/h2_male_", depvar, "_GxE_", prefix, ".hsq"))
+GxEhsq_info1 <- cbind(prefix, GxEhsq[6,2:3], NA, NA)
+colnames(GxEhsq_info1)[4:5] <- c("LRT", "LRT-P")
+GxEhsq_info2 <- cbind(prefix, GxEhsq[7,2:3], NA, NA)
+colnames(GxEhsq_info2)[4:5] <- c("LRT", "LRT-P")
+GxEhsq_info3 <- cbind(prefix, GxEhsq[8,2:3], GxEhsq[12,2], GxEhsq[14,2])
+colnames(GxEhsq_info3)[4:5] <- c("LRT", "LRT-P")
+GxEhsq_info <- Reduce(function(x,y) rbind(x=x,y=y), list(GxEhsq_info1, GxEhsq_info2, GxEhsq_info3))
+    
+# combine all results
+allinfo <- Reduce(function(x,y) rbind(x=x,y=y), list(Ghsq_info, Ehsq_info, G_Ehsq_info, GxEhsq_info))
+write.csv(allinfo, paste0(sample, "_", E, "_", depvar, "_VCA_results_", prefix, ".csv"), row.names=F)
+}
+
+################################
+#    META-ANALYSED RESULTS     #   
+################################
+
+for(depvar in c("broad", "cidi", "neuro")){
+  
+# reading in GRM model results
+grminfo <- read.csv(paste0("../meta_analyses/", depvar, "_", sample, "_GRM_", E, "_meta_VCA_info.csv"))
+grm_info <- cbind("meta-A", grminfo[,6:8])
+colnames(grm_info)[2:4] <- c("Variance", "SE", "P")
+
+# reading in ERM model results
+erminfo <- read.csv(paste0("../meta_analyses/", depvar, "_", sample, "_ERM_", E, "_meta_VCA_info.csv"))
+erm_info <- cbind("meta-A", erminfo[,6:8])
+colnames(erm_info)[2:4] <- c("Variance", "SE", "P")
+
+# reading in GRM + ERM model results
+G_Einfo <- read.csv(paste0("../meta_analyses/", depvar, "_", sample, "_G+E_", E, "_meta_VCA_info.csv"))
+G_E_info <- cbind("meta-A", G_Einfo[1:2,6:8])
+colnames(G_E_info)[2:4] <- c("Variance", "SE", "P")
+
+# reading in GRM + ERM + GRMxERM model results
+GxEinfo <- read.csv(paste0("../meta_analyses/", depvar, "_", sample, "_GxE_", E, "_meta_VCA_info.csv"))
+GxE_info <- cbind("meta-A", GxEinfo[1:3,6:8])
+colnames(GxE_info)[2:4] <- c("Variance", "SE", "P")
+
+# combine all results
+
+allinfo <- Reduce(function(x,y) rbind(x=x,y=y), list(grm_info, erm_info, G_E_info, GxE_info))
+write.csv(allinfo, paste0(sample, "_", E, "_", depvar, "_meta_VCA_results.csv"), row.names=F)
+
+}
+```
+
