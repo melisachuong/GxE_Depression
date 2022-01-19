@@ -1440,10 +1440,12 @@ birth_coords <- birthplace %>% select(Easting=birthplace_east, Northing=birthpla
 plot1 <- ggplot(birthplace_centre, aes(x=home_east, y=home_north, colour=centre)) +
 geom_point() +
 xlab("East Coordinate") + ylab("North Coordinate") + labs(colour="Centre") + 
-theme_bw()
+theme_bw() + 
+theme(legend.title = element_text(size=15), legend.text = element_text(size=15), axis.title = element_text(size=15))
 
-ggsave(file="test.svg", plot=plot1, width=10, height=10)
-ggsave(file="test.png", plot=plot1, width=10, height=10)
+ggsave(file="test.svg", plot=plot1, width=8, height=6)
+ggsave(file="test.png", plot=plot1, width=8, height=6)
+
 
 ```
 
