@@ -14,7 +14,7 @@ In this study we are interested in Genome-by-Trauma Exposure interaction effects
 # Relationship Matrices  
 
 We have a realtively large sample with available genomic and trauma data ~150k, so this would mean we would be creating 150k by 150k matrices. This is not too difficult to compute, however, including these matrices into MLMs (downstream analyses) would be computationally exhaustive.  
-So here, I create sub-samples based on geographical location of participants (geographical clusters).
+So here, we create sub-samples based on geographical location of participants (geographical clusters).
 
 Clusters: 
 ![Geographical Clusters](GxE_Figures/Slide1.PNG)  
