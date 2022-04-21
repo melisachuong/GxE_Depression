@@ -41,7 +41,7 @@ Remember, the environmental variable can represent any variable of interest. In 
 Matrices are formed used OSCA software, where diagonals represent trauma exposure similarity of individuals with themselves, and offdiagonals represent pairwise trauma exposure similarities. 
 This is based on the how similar the PC values are between each individual. 
 OSCA has three algorithms to calculate similarity between two individuals using the trauma exposure principal components. Algorithm 2 is irrelevant to our data. 
-Results MLM including ERMs computed using algorithm 1 vs 3 show negligible differences.
+Results of MLM including ERMs computed using algorithm 1 vs 3 show negligible differences.
 
 Algorithm 1 results in matrices with diagonals that average to 1. Algorithm 3 results in matrices with diagonal values of 1. The offdiagonals of the ERMs are plotted against the offdiagonals of GRMs. 
 We chose to use the default algorithm 1 going forward. 
